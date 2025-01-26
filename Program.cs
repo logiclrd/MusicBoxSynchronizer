@@ -46,6 +46,7 @@ namespace MusicBoxSynchronizer
 			WireUpDiagnosticOutput();
 
 			s_googleDriveRepository.Initialize();
+			s_localFileSystemRepository.Initialize();
 
 			LoadChanges();
 

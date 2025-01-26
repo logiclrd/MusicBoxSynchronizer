@@ -46,14 +46,14 @@ namespace MusicBoxSynchronizer
 		}
 
 		public static ManifestFileInfo Build(File file, Manifest manifest)
-			=> Build(file, file, manifest);
+			=> Build(file, file.Parents?.SingleOrDefault(), file, manifest);
 
-		public static ManifestFileInfo Build(File file, File actualFile, Manifest manifest)
+		public static ManifestFileInfo Build(File file, string? parentFileID, File actualFile, Manifest manifest)
 		{
 			string container = "";
 
-			if ((file.Parents?.Any() ?? false)
-			 && (manifest.GetFolderPath(file.Parents.Single()) is string containerPath))
+			if ((parentFileID != null)
+			 && (manifest.GetFolderPath(parentFileID) is string containerPath))
 				container = containerPath + "/";
 
 			return

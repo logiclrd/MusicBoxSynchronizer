@@ -9,6 +9,8 @@ namespace MusicBoxSynchronizer
 	{
 		public const string DefaultRepositoryPath = @"C:\MusicBoxDrive";
 
+		const string ManifestStateFileName = "local_drive_manifest";
+
 		Manifest _manifest;
 
 		public LocalFileSystemRepository()
@@ -18,10 +20,13 @@ namespace MusicBoxSynchronizer
 
 		public LocalFileSystemRepository(string rootPath)
 		{
-			if (!Directory.Exists(rootPath))
-				Directory.CreateDirectory(rootPath);
-
 			_rootPath = rootPath;
+		}
+
+		public void Initialize()
+		{
+			if (!Directory.Exists(_rootPath))
+				Directory.CreateDirectory(_rootPath);
 
 			_watcher = new FileSystemWatcher(_rootPath);
 			_watcher.NotifyFilter =
@@ -37,7 +42,33 @@ namespace MusicBoxSynchronizer
 
 			_watcher.IncludeSubdirectories = true;
 
-			_manifest = Manifest.Build(rootPath);
+			Manifest? TryLoadManifest()
+			{
+				if (File.Exists(ManifestStateFileName))
+				{
+					try
+					{
+						OnDiagnosticOutput("Loading existing manifest...");
+						return Manifest.LoadFrom(ManifestStateFileName);
+					}
+					catch {}
+				}
+
+				return null;
+			}
+
+			Manifest BuildManifest()
+			{
+				OnDiagnosticOutput("Building manifest...");
+
+				var manifest = Manifest.Build(_rootPath!);
+
+				manifest.SaveTo(ManifestStateFileName);
+
+				return manifest;
+			}
+
+			_manifest = TryLoadManifest() ?? BuildManifest();
 		}
 
 		string _rootPath;
@@ -79,7 +110,14 @@ namespace MusicBoxSynchronizer
 			if (new FileInfo(fullPath).Length != fileInfo.FileSize)
 				return false;
 
-			if (MD5Utility.ComputeChecksum(fullPath) != fileInfo.MD5Checksum)
+			var localManifestFileInfo = _manifest.GetFileInfo(fileInfo.FilePath);
+
+			if (localManifestFileInfo == null)
+				return false;
+
+			if (localManifestFileInfo.FileSize != fileInfo.FileSize)
+				return false;
+			if (localManifestFileInfo.MD5Checksum != fileInfo.MD5Checksum)
 				return false;
 
 			return true;
@@ -102,7 +140,10 @@ namespace MusicBoxSynchronizer
 			OnDiagnosticOutput("Creating or updating file: " + path);
 
 			using (var fileStream = File.OpenWrite(GetFullPath(path)))
+			{
 				content.CopyTo(fileStream);
+				fileStream.SetLength(fileStream.Position);
+			}
 		}
 
 		public override void MoveFile(string oldPath, string newPath)
@@ -169,6 +210,31 @@ namespace MusicBoxSynchronizer
 		bool IsDirectorySeparatorChar(char ch)
 		{
 			return (ch == Path.DirectorySeparatorChar) || (ch == Path.AltDirectorySeparatorChar);
+		}
+
+		protected override void OnChangeDetected(ChangeInfo change)
+		{
+			base.OnChangeDetected(change);
+
+			string fullPath = GetFullPath(change.FilePath);
+
+			long fileSize = -1;
+			DateTime modifiedTimeUTC = DateTime.MinValue;
+
+			if (File.Exists(fullPath))
+			{
+				var fileInfo = new FileInfo(fullPath);
+
+				fileSize = fileInfo.Length;
+				modifiedTimeUTC = fileInfo.LastWriteTimeUtc;
+			}
+
+			_manifest.RegisterChange(
+				change,
+				fileSize,
+				modifiedTimeUTC);
+
+			_manifest.SaveTo(ManifestStateFileName);
 		}
 
 		void RaiseChangedEvent(ChangeType changeType, string fullPath, string? oldFullPath = null)

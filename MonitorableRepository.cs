@@ -29,7 +29,7 @@ namespace MusicBoxSynchronizer
 			DiagnosticOutput?.Invoke(this, text);
 		}
 
-		protected void OnChangeDetected(ChangeInfo change)
+		protected virtual void OnChangeDetected(ChangeInfo change)
 		{
 			ChangeDetected?.Invoke(this, change);
 		}

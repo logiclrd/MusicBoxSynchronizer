@@ -30,7 +30,7 @@ namespace MusicBoxSynchronizer
 			var enumeration = new FileSystemEnumerable<(FileSystemInfo Entry, string SpecifiedFullPath)>(
 				localPath,
 				(ref FileSystemEntry entry) => (entry.ToFileSystemInfo(), entry.ToSpecifiedFullPath()),
-				new EnumerationOptions() { RecurseSubdirectories = true });
+				new EnumerationOptions() { RecurseSubdirectories = true, AttributesToSkip = FileAttributes.None });
 
 			foreach (var (entry, specifiedFullPath) in enumeration)
 			{
@@ -77,11 +77,13 @@ namespace MusicBoxSynchronizer
 				" or "
 				+ $"mimeType = '{Constants.GoogleDriveShortcutMIMEType}'" +
 				$") and trashed = false and 'me' in owners";
-			listRequest.Fields = "nextPageToken, files(id, name, parents, mimeType, shortcutDetails(targetMimeType))";
+			listRequest.Fields = "nextPageToken, files(id, name, parents, mimeType, shortcutDetails(targetId, targetMimeType))";
 
 			var folderMap = new Dictionary<string, File>();
 
 			folderMap[rootFolderFile.Id] = rootFolderFile;
+
+			var shortcutTargets = new List<(string ApparentPath, string ShortcutFileID, string ActualFileID)>();
 
 			while (true)
 			{
@@ -95,6 +97,8 @@ namespace MusicBoxSynchronizer
 					{
 						if (folderFile.ShortcutDetails.TargetMimeType != Constants.GoogleDriveFolderMIMEType)
 							continue;
+
+						shortcutTargets.Add(("unknown", folderFile.Id, folderFile.ShortcutDetails.TargetId));
 					}
 
 					folderMap[folderFile.Id] = folderFile;
@@ -160,6 +164,67 @@ namespace MusicBoxSynchronizer
 					listRequest.PageToken = list.NextPageToken;
 				else
 					break;
+			}
+
+			for (int i=0; i < shortcutTargets.Count; i++)
+			{
+				var shortcutTarget = shortcutTargets[i];
+
+				shortcutTarget.ApparentPath = ret._folders[shortcutTarget.ShortcutFileID];
+
+				listRequest.Q = $"'{shortcutTarget.ActualFileID}' in parents";
+				listRequest.PageToken = null;
+
+				while (true)
+				{
+					var list = listRequest.Execute();
+
+					foreach (var file in list.Files)
+					{
+						var actualFile = file;
+
+						// We must recurse manually into subfolders.
+						if (file.MimeType == Constants.GoogleDriveFolderMIMEType)
+						{
+							string subPath = Path.Combine(shortcutTarget.ApparentPath, file.Name);
+
+							ret._folders[file.Id] = subPath;
+							ret._idByPath[subPath] = file.Id;
+
+							shortcutTargets.Add((subPath, file.Id, file.Id));
+
+							continue;
+						}
+
+						// We can't filter shortcuts precisely with Q (apparently Q supports shortcutDetails.targetId but not
+						// shortcutDetails.targetMimeType), so we have to do it manually here.
+						if (file.MimeType == Constants.GoogleDriveShortcutMIMEType)
+						{
+							if (file.ShortcutDetails.TargetMimeType == Constants.GoogleDriveFolderMIMEType)
+							{
+								string subPath = Path.Combine(shortcutTarget.ApparentPath, file.Name);
+
+								ret._folders[file.Id] = subPath;
+								ret._idByPath[subPath] = file.Id;
+
+								shortcutTargets.Add((subPath, file.Id, file.ShortcutDetails.TargetId));
+
+								continue;
+							}
+
+							var getRequest = service.Files.Get(file.ShortcutDetails.TargetId);
+
+							actualFile = getRequest.Execute();
+						}
+
+						ret.PopulateFile(file, shortcutTarget.ShortcutFileID, actualFile);
+					}
+
+					if (!string.IsNullOrEmpty(list.NextPageToken))
+						listRequest.PageToken = list.NextPageToken;
+					else
+						break;
+				}
 			}
 
 			ret.HasChanges = false;
@@ -265,8 +330,11 @@ namespace MusicBoxSynchronizer
 		}
 
 		public void PopulateFile(File file, File actualFile)
+			=> PopulateFile(file, file.Parents?.SingleOrDefault(), actualFile);
+
+		public void PopulateFile(File file, string? parentFileID, File actualFile)
 		{
-			var fileInfo = ManifestFileInfo.Build(file, actualFile, this);
+			var fileInfo = ManifestFileInfo.Build(file, parentFileID, actualFile, this);
 
 			_files[file.Id] = fileInfo;
 			_idByPath[fileInfo.FilePath] = file.Id;
@@ -297,62 +365,63 @@ namespace MusicBoxSynchronizer
 		}
 
 		public ChangeInfo? RegisterChange(Change change, MonitorableRepository sourceRepository)
+			=> ((change.Removed ?? false) || (change.File.Trashed ?? false))
+				? RegisterRemoval(change.FileId, change.File.Md5Checksum, sourceRepository)
+				: RegisterChange(change.File, sourceRepository);
+
+		public ChangeInfo RegisterChange(File file, MonitorableRepository sourceRepository)
+			=> RegisterChange(ManifestFileInfo.Build(file, this), file.Id, file.Name, file.MimeType, file.Parents?.SingleOrDefault(), sourceRepository);
+
+		ChangeInfo? RegisterRemoval(string fileID, string? fileMD5Checksum, MonitorableRepository sourceRepository)
 		{
-			if ((change.Removed ?? false) || (change.File.Trashed ?? false))
+			if (_files.TryGetValue(fileID, out var removedFile))
 			{
-				if (_files.TryGetValue(change.FileId, out var removedFile))
-				{
-					_files.Remove(change.FileId);
-					_idByPath.Remove(removedFile.FilePath);
-					_hasChanges = true;
+				_files.Remove(fileID);
+				_idByPath.Remove(removedFile.FilePath);
+				_hasChanges = true;
 
-					return new ChangeInfo(
-						sourceRepository: sourceRepository,
-						changeType: ChangeType.Removed,
-						filePath: removedFile?.FilePath ?? "<unknown>",
-						md5Checksum: change.File.Md5Checksum ?? removedFile?.MD5Checksum ?? "<unknown>");
-				}
-
-				if (_folders.TryGetValue(change.FileId, out var removedFolderPath))
-				{
-					_folders.Remove(change.FileId);
-					_idByPath.Remove(removedFolderPath);
-					_hasChanges = true;
-
-					return new ChangeInfo(
-						sourceRepository: sourceRepository,
-						changeType: ChangeType.Removed,
-						filePath: removedFolderPath,
-						isFolder: true);
-				}
+				return new ChangeInfo(
+					sourceRepository: sourceRepository,
+					changeType: ChangeType.Removed,
+					filePath: removedFile?.FilePath ?? "<unknown>",
+					md5Checksum: fileMD5Checksum ?? removedFile?.MD5Checksum ?? "<unknown>");
 			}
-			else
-				return RegisterChange(change.File, sourceRepository);
+
+			if (_folders.TryGetValue(fileID, out var removedFolderPath))
+			{
+				_folders.Remove(fileID);
+				_idByPath.Remove(removedFolderPath);
+				_hasChanges = true;
+
+				return new ChangeInfo(
+					sourceRepository: sourceRepository,
+					changeType: ChangeType.Removed,
+					filePath: removedFolderPath,
+					isFolder: true);
+			}
 
 			return null;
 		}
 
-		public ChangeInfo RegisterChange(File file, MonitorableRepository sourceRepository)
+		public ChangeInfo RegisterChange(ManifestFileInfo newFileInfo, string fileID, string fileName, string fileMIMEType, string? fileParentFileID, MonitorableRepository sourceRepository)
 		{
-			var newFileInfo = ManifestFileInfo.Build(file, this);
-
-			if (file.MimeType != Constants.GoogleDriveFolderMIMEType)
+			if (fileMIMEType != Constants.GoogleDriveFolderMIMEType)
 			{
 				string container = "";
 
-				if (file.Parents?.Any() ?? false)
+				if (fileParentFileID != null)
 				{
-					_folders.TryGetValue(file.Parents.Single(), out var containerPath);
+					_folders.TryGetValue(fileParentFileID, out var containerPath);
 
 					if (containerPath != null)
 						container = containerPath + "/";
 				}
 
-				string newFolderPath = container + file.Name;
+				string newFolderPath = container + fileName;
 
 				try
 				{
-					if (_folders.TryGetValue(file.Id, out var oldFolderPath)
+					if (_folders.TryGetValue(fileID, out var oldFolderPath)
 					 && (oldFolderPath != newFolderPath))
 					{
 						return new ChangeInfo(
@@ -373,7 +442,7 @@ namespace MusicBoxSynchronizer
 				}
 				finally
 				{
-					_folders[file.Id] = newFolderPath;
+					_folders[fileID] = newFolderPath;
 					_hasChanges = true;
 				}
 			}
@@ -381,17 +450,40 @@ namespace MusicBoxSynchronizer
 			{
 				try
 				{
-					if (_files.TryGetValue(file.Id, out var oldFileInfo))
+					if (_files.TryGetValue(fileID, out var oldFileInfo))
 						return newFileInfo.CompareTo(oldFileInfo, sourceRepository);
 					else
 						return newFileInfo.GenerateCreationChangeInfo(sourceRepository);
 				}
 				finally
 				{
-					_files[file.Id] = newFileInfo;
+					_files[fileID] = newFileInfo;
 					_hasChanges = true;
 				}
 			}
+		}
+
+		public ChangeInfo RegisterChange(ChangeInfo changeInfo, long fileSize, DateTime modifiedTimeUTC)
+		{
+			if (_idByPath.TryGetValue(changeInfo.FilePath, out var fileID))
+			{
+				if (changeInfo.ChangeType == ChangeType.Removed)
+					RegisterRemoval(fileID, changeInfo.MD5Checksum, changeInfo.SourceRepository);
+				else
+				{
+					var newFileInfo = new ManifestFileInfo(changeInfo.FilePath, changeInfo.MD5Checksum);
+
+					newFileInfo.FileSize = fileSize;
+					newFileInfo.ModifiedTimeUTC = modifiedTimeUTC;
+
+					string fileName = Path.GetFileName(changeInfo.FilePath);
+					string containerPath = Path.GetDirectoryName(changeInfo.FilePath) ?? "";
+
+					RegisterChange(newFileInfo, fileID, fileName, "application/octet-stream", GetFileID(containerPath), changeInfo.SourceRepository);
+				}
+			}
+
+			return changeInfo;
 		}
 	}
 }
