@@ -158,7 +158,7 @@ namespace MusicBoxSynchronizer
 
 					foreach (var change in changeList.Changes)
 					{
-						var changeInfo = _manifest.RegisterChange(change);
+						var changeInfo = _manifest.RegisterChange(change, this);
 
 						// If a file is marked Trashed and it's already not in the manifest, no change is returned.
 						if (changeInfo != null)

@@ -218,7 +218,7 @@ namespace MusicBoxSynchronizer
 				return null;
 		}
 
-		public ChangeInfo? RegisterChange(Change change)
+		public ChangeInfo? RegisterChange(Change change, MonitorableRepository sourceRepository)
 		{
 			if ((change.Removed ?? false) || (change.File.Trashed ?? false))
 			{
@@ -229,6 +229,7 @@ namespace MusicBoxSynchronizer
 					_hasChanges = true;
 
 					return new ChangeInfo(
+						sourceRepository: sourceRepository,
 						changeType: ChangeType.Removed,
 						filePath: removedFile?.FilePath ?? "<unknown>");
 				}
@@ -240,18 +241,19 @@ namespace MusicBoxSynchronizer
 					_hasChanges = true;
 
 					return new ChangeInfo(
+						sourceRepository: sourceRepository,
 						changeType: ChangeType.Removed,
 						filePath: removedFolderPath,
 						isFolder: true);
 				}
 			}
 			else
-				return RegisterChange(change.File);
+				return RegisterChange(change.File, sourceRepository);
 
 			return null;
 		}
 
-		public ChangeInfo RegisterChange(File file)
+		public ChangeInfo RegisterChange(File file, MonitorableRepository sourceRepository)
 		{
 			var newFileInfo = ManifestFileInfo.Build(file, this);
 
@@ -275,6 +277,7 @@ namespace MusicBoxSynchronizer
 					 && (oldFolderPath != newFolderPath))
 					{
 						return new ChangeInfo(
+							sourceRepository: sourceRepository,
 							changeType: ChangeType.Moved,
 							filePath: newFolderPath,
 							oldFilePath: oldFolderPath,
@@ -283,6 +286,7 @@ namespace MusicBoxSynchronizer
 					else
 					{
 						return new ChangeInfo(
+							sourceRepository: sourceRepository,
 							changeType: ChangeType.Created,
 							filePath: newFolderPath,
 							isFolder: true);
@@ -299,9 +303,9 @@ namespace MusicBoxSynchronizer
 				try
 				{
 					if (_files.TryGetValue(file.Id, out var oldFileInfo))
-						return newFileInfo.CompareTo(oldFileInfo);
+						return newFileInfo.CompareTo(oldFileInfo, sourceRepository);
 					else
-						return newFileInfo.GenerateCreationChangeInfo();
+						return newFileInfo.GenerateCreationChangeInfo(sourceRepository);
 				}
 				finally
 				{

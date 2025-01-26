@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.Threading;
 
 namespace MusicBoxSynchronizer
 {
@@ -6,21 +8,22 @@ namespace MusicBoxSynchronizer
 	{
 		static void Main()
 		{
-			var repositories =
+			MonitorableRepository[] repositories =
 				[
 					new GoogleDriveRepository(),
 					new LocalFileSystemRepository(),
 				];
-
-			// TODO: how to suppress feedback, where the act of propagating a change to a repository
-			//       generates a detection itself?
 
 			foreach (var repository in repositories)
 			{
 				repository.ChangeDetected +=
 					(sender, change) =>
 					{
-						// TODO
+						lock (s_sync)
+						{
+							s_changesToProcess.Enqueue(change);
+							Monitor.PulseAll(s_sync);
+						}
 					};
 
 				repository.StartMonitor();
@@ -31,5 +34,11 @@ namespace MusicBoxSynchronizer
 			Console.WriteLine("Press enter to exit");
 			Console.ReadLine();
 		}
+
+			// TODO: how to suppress feedback, where the act of propagating a change to a repository
+			//       generates a detection itself?
+
+		static object s_sync = new object();
+		static Queue<ChangeInfo> s_changesToProcess = new Queue<ChangeInfo>();
 	}
 }

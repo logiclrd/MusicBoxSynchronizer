@@ -65,7 +65,7 @@ namespace MusicBoxSynchronizer
 				};
 		}
 
-		public ChangeInfo CompareTo(ManifestFileInfo oldFileInfo)
+		public ChangeInfo CompareTo(ManifestFileInfo oldFileInfo, MonitorableRepository sourceRepository)
 		{
 			bool renamed = this.FilePath != oldFileInfo.FilePath;
 			bool modified = (this.FileSize != oldFileInfo.FileSize) || (this.MD5Checksum != oldFileInfo.MD5Checksum);
@@ -73,6 +73,7 @@ namespace MusicBoxSynchronizer
 			if (modified && !renamed)
 			{
 				return new ChangeInfo(
+					sourceRepository: sourceRepository,
 					changeType: ChangeType.Modified,
 					filePath: this.FilePath);
 			}
@@ -83,6 +84,7 @@ namespace MusicBoxSynchronizer
 				string containerPath = this.FilePath.Substring(0, lastSeparator + 1);
 
 				return new ChangeInfo(
+					sourceRepository: sourceRepository,
 					changeType:
 						oldFileInfo.FilePath.StartsWith(containerPath)
 						? ChangeType.Renamed
@@ -93,15 +95,17 @@ namespace MusicBoxSynchronizer
 			else
 			{
 				return new ChangeInfo(
+					sourceRepository: sourceRepository,
 					changeType: ChangeType.MovedAndModified,
 					filePath: this.FilePath,
 					oldFilePath: oldFileInfo.FilePath);
 			}
 		}
 
-		public ChangeInfo GenerateCreationChangeInfo()
+		public ChangeInfo GenerateCreationChangeInfo(MonitorableRepository sourceRepository)
 		{
 			return new ChangeInfo(
+				sourceRepository: sourceRepository,
 				changeType: ChangeType.Created,
 				filePath: this.FilePath);
 		}
