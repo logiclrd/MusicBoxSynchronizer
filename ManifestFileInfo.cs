@@ -1,10 +1,6 @@
 using System;
-using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-
-using Google.Apis.Drive.v3;
-using Google.Apis.Drive.v3.Data;
 
 using File = Google.Apis.Drive.v3.Data.File;
 
@@ -75,7 +71,8 @@ namespace MusicBoxSynchronizer
 				return new ChangeInfo(
 					sourceRepository: sourceRepository,
 					changeType: ChangeType.Modified,
-					filePath: this.FilePath);
+					filePath: this.FilePath,
+					md5Checksum: this.MD5Checksum);
 			}
 			else if (renamed && !modified)
 			{
@@ -90,7 +87,9 @@ namespace MusicBoxSynchronizer
 						? ChangeType.Renamed
 						: ChangeType.Moved,
 					filePath: this.FilePath,
-					oldFilePath: oldFileInfo.FilePath);
+					oldFilePath: oldFileInfo.FilePath,
+					md5Checksum: this.MD5Checksum,
+					oldMD5Checksum: this.MD5Checksum);
 			}
 			else
 			{
@@ -98,7 +97,9 @@ namespace MusicBoxSynchronizer
 					sourceRepository: sourceRepository,
 					changeType: ChangeType.MovedAndModified,
 					filePath: this.FilePath,
-					oldFilePath: oldFileInfo.FilePath);
+					oldFilePath: oldFileInfo.FilePath,
+					md5Checksum: this.MD5Checksum,
+					oldMD5Checksum: oldFileInfo.MD5Checksum);
 			}
 		}
 
@@ -107,7 +108,8 @@ namespace MusicBoxSynchronizer
 			return new ChangeInfo(
 				sourceRepository: sourceRepository,
 				changeType: ChangeType.Created,
-				filePath: this.FilePath);
+				filePath: this.FilePath,
+				md5Checksum: this.MD5Checksum);
 		}
 	}
 }

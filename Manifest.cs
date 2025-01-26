@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Enumeration;
 using System.Linq;
 
 using Google.Apis.Drive.v3;
@@ -17,6 +18,44 @@ namespace MusicBoxSynchronizer
 		Dictionary<string, ManifestFileInfo> _files = new Dictionary<string, ManifestFileInfo>();
 		Dictionary<string, string> _idByPath = new Dictionary<string, string>();
 		bool _hasChanges;
+
+		public static Manifest Build(string localPath)
+		{
+			Manifest ret = new Manifest();
+
+			if (!localPath.EndsWith(Path.DirectorySeparatorChar)
+			 && !localPath.EndsWith(Path.AltDirectorySeparatorChar))
+				localPath += Path.DirectorySeparatorChar;
+
+			var enumeration = new FileSystemEnumerable<(FileSystemInfo Entry, string SpecifiedFullPath)>(
+				localPath,
+				(ref FileSystemEntry entry) => (entry.ToFileSystemInfo(), entry.ToSpecifiedFullPath()),
+				new EnumerationOptions() { RecurseSubdirectories = true });
+
+			foreach (var (entry, specifiedFullPath) in enumeration)
+			{
+				if (!specifiedFullPath.StartsWith(localPath))
+					continue;
+
+				string relativePath = specifiedFullPath.Substring(localPath.Length);
+
+				if (entry is DirectoryInfo)
+					ret._folders[relativePath] = relativePath;
+				else if (entry is FileInfo fileEntry)
+				{
+					string md5Checksum = MD5Utility.ComputeChecksum(entry.FullName);
+
+					var fileInfo = new ManifestFileInfo(relativePath, md5Checksum);
+
+					fileInfo.FileSize = fileEntry.Length;
+					fileInfo.ModifiedTimeUTC = fileEntry.LastWriteTimeUtc;
+
+					ret._files[relativePath] = fileInfo;
+				}
+			}
+
+			return ret;
+		}
 
 		public static Manifest Build(DriveService service)
 		{
@@ -76,7 +115,7 @@ namespace MusicBoxSynchronizer
 			}
 
 			listRequest.Q = $"mimeType != '{Constants.GoogleDriveFolderMIMEType}' and trashed = false";
-			listRequest.Fields = "files(id, name, parents, size, modifiedTime)";
+			listRequest.Fields = "files(id, name, parents, size, md5Checksum, modifiedTime)";
 
 			while (true)
 			{
@@ -167,6 +206,9 @@ namespace MusicBoxSynchronizer
 			_hasChanges = false;
 		}
 
+		public IEnumerable<string> EnumerateFolders() => _folders.Values;
+		public IEnumerable<ManifestFileInfo> EnumerateFiles() => _files.Values;
+
 		public string PageToken
 		{
 			get => _pageToken;
@@ -231,7 +273,8 @@ namespace MusicBoxSynchronizer
 					return new ChangeInfo(
 						sourceRepository: sourceRepository,
 						changeType: ChangeType.Removed,
-						filePath: removedFile?.FilePath ?? "<unknown>");
+						filePath: removedFile?.FilePath ?? "<unknown>",
+						md5Checksum: change.File.Md5Checksum ?? removedFile?.MD5Checksum ?? "<unknown>");
 				}
 
 				if (_folders.TryGetValue(change.FileId, out var removedFolderPath))

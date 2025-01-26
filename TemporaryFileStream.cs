@@ -8,11 +8,10 @@ namespace MusicBoxSynchronizer
 		string _path;
 		bool _disposed;
 
-		public TemporaryFileStream(string path, FileMode mode)
-			: base(path, mode)
+		public TemporaryFileStream(string path, FileMode mode, FileAccess access)
+			: base(path, mode, access)
 		{
 			_path = path;
-			
 		}
 
 		protected override void Dispose(bool disposing)
