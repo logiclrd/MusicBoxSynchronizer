@@ -46,6 +46,9 @@ namespace MusicBoxSynchronizer
 		}
 
 		public static ManifestFileInfo Build(File file, Manifest manifest)
+			=> Build(file, file, manifest);
+
+		public static ManifestFileInfo Build(File file, File actualFile, Manifest manifest)
 		{
 			string container = "";
 
@@ -54,10 +57,10 @@ namespace MusicBoxSynchronizer
 				container = containerPath + "/";
 
 			return
-				new ManifestFileInfo(container + file.Name, file.Md5Checksum)
+				new ManifestFileInfo(container + file.Name, actualFile.Md5Checksum)
 				{
-					FileSize = file.Size ?? -1,
-					ModifiedTimeUTC = (file.ModifiedTimeDateTimeOffset ?? DateTimeOffset.MinValue).UtcDateTime,
+					FileSize = actualFile.Size ?? -1,
+					ModifiedTimeUTC = (actualFile.ModifiedTimeDateTimeOffset ?? DateTimeOffset.MinValue).UtcDateTime,
 				};
 		}
 

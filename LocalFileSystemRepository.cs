@@ -101,7 +101,7 @@ namespace MusicBoxSynchronizer
 		{
 			OnDiagnosticOutput("Creating or updating file: " + path);
 
-			using (var fileStream = File.OpenWrite(path))
+			using (var fileStream = File.OpenWrite(GetFullPath(path)))
 				content.CopyTo(fileStream);
 		}
 

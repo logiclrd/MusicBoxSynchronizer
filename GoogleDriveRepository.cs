@@ -254,9 +254,11 @@ namespace MusicBoxSynchronizer
 
 			OnDiagnosticOutput("Retrieving file: " + path);
 
-			var downloadRequest = _driveService!.Files.Download(fileID);
+			var get = _driveService!.Files.Get(fileID);
 
-			using (var downloadStream = downloadRequest.ExecuteAsStream())
+			get.Alt = DriveBaseServiceRequest<Google.Apis.Drive.v3.Data.File>.AltEnum.Media;
+
+			using (var downloadStream = get.ExecuteAsStream())
 			{
 				var temporaryFileStream = new TemporaryFileStream(Path.GetTempFileName(), FileMode.Open, FileAccess.ReadWrite);
 

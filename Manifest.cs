@@ -71,8 +71,13 @@ namespace MusicBoxSynchronizer
 
 			var listRequest = service.Files.List();
 
-			listRequest.Q = $"mimeType = '{Constants.GoogleDriveFolderMIMEType}' and trashed = false";
-			listRequest.Fields = "files(id, name, parents)";
+			listRequest.Q =
+				$"("
+				+ $"mimeType = '{Constants.GoogleDriveFolderMIMEType}'" +
+				" or "
+				+ $"mimeType = '{Constants.GoogleDriveShortcutMIMEType}'" +
+				$") and trashed = false and 'me' in owners";
+			listRequest.Fields = "nextPageToken, files(id, name, parents, mimeType, shortcutDetails(targetMimeType))";
 
 			var folderMap = new Dictionary<string, File>();
 
@@ -83,7 +88,17 @@ namespace MusicBoxSynchronizer
 				var list = listRequest.Execute();
 
 				foreach (var folderFile in list.Files)
+				{
+					// We can't filter shortcuts precisely with Q (apparently Q supports shortcutDetails.targetId but not
+					// shortcutDetails.targetMimeType), so we have to do it manually here.
+					if (folderFile.MimeType == Constants.GoogleDriveShortcutMIMEType)
+					{
+						if (folderFile.ShortcutDetails.TargetMimeType != Constants.GoogleDriveFolderMIMEType)
+							continue;
+					}
+
 					folderMap[folderFile.Id] = folderFile;
+				}
 
 				if (!string.IsNullOrEmpty(list.NextPageToken))
 					listRequest.PageToken = list.NextPageToken;
@@ -114,15 +129,32 @@ namespace MusicBoxSynchronizer
 				ret._idByPath[path] = folderFile.Id;
 			}
 
-			listRequest.Q = $"mimeType != '{Constants.GoogleDriveFolderMIMEType}' and trashed = false";
-			listRequest.Fields = "files(id, name, parents, size, md5Checksum, modifiedTime)";
+			listRequest.Q = $"mimeType != '{Constants.GoogleDriveFolderMIMEType}' and trashed = false and 'me' in owners";
+			listRequest.Fields = "nextPageToken, files(id, name, parents, size, md5Checksum, modifiedTime, mimeType, shortcutDetails(targetId, targetMimeType))";
+			listRequest.PageToken = null;
 
 			while (true)
 			{
 				var list = listRequest.Execute();
 
 				foreach (var file in list.Files)
-					ret.PopulateFile(file);
+				{
+					var actualFile = file;
+
+					// We can't filter shortcuts precisely with Q (apparently Q supports shortcutDetails.targetId but not
+					// shortcutDetails.targetMimeType), so we have to do it manually here.
+					if (file.MimeType == Constants.GoogleDriveShortcutMIMEType)
+					{
+						if (file.ShortcutDetails.TargetMimeType == Constants.GoogleDriveFolderMIMEType)
+							continue;
+
+						var getRequest = service.Files.Get(file.ShortcutDetails.TargetId);
+
+						actualFile = getRequest.Execute();
+					}
+
+					ret.PopulateFile(file, actualFile);
+				}
 
 				if (!string.IsNullOrEmpty(list.NextPageToken))
 					listRequest.PageToken = list.NextPageToken;
@@ -157,6 +189,7 @@ namespace MusicBoxSynchronizer
 					string path = reader.ReadLine() ?? throw new Exception("Unexpected EOF");
 
 					ret._folders[id] = path;
+					ret._idByPath[path] = id;
 				}
 			}
 
@@ -170,8 +203,11 @@ namespace MusicBoxSynchronizer
 					var file = ManifestFileInfo.LoadFrom(reader);
 
 					ret._files[id] = file;
+					ret._idByPath[file.FilePath] = id;
 				}
 			}
+
+			ret._hasChanges = false;
 
 			return ret;
 		}
@@ -228,9 +264,9 @@ namespace MusicBoxSynchronizer
 			set => _hasChanges = value;
 		}
 
-		public void PopulateFile(File file)
+		public void PopulateFile(File file, File actualFile)
 		{
-			var fileInfo = ManifestFileInfo.Build(file, this);
+			var fileInfo = ManifestFileInfo.Build(file, actualFile, this);
 
 			_files[file.Id] = fileInfo;
 			_idByPath[fileInfo.FilePath] = file.Id;
