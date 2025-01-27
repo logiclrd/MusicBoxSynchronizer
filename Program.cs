@@ -33,12 +33,21 @@ namespace MusicBoxSynchronizer
 		{
 			foreach (var folderPath in s_googleDriveRepository.EnumerateFolders())
 				if (!s_localFileSystemRepository.DoesFolderExist(folderPath))
+				{
 					s_localFileSystemRepository.CreateFolder(folderPath);
+					s_localFileSystemRepository.RegisterFolder(folderPath);
+				}
 
 			foreach (var fileInfo in s_googleDriveRepository.EnumerateFiles())
 				if (!s_localFileSystemRepository.DoesFileExist(fileInfo))
+				{
 					using (var contentStream = s_googleDriveRepository.GetFileContentStream(fileInfo.FilePath))
 						s_localFileSystemRepository.CreateOrUpdateFile(fileInfo.FilePath, contentStream);
+
+					s_localFileSystemRepository.RegisterFile(fileInfo);
+				}
+
+			s_localFileSystemRepository.SaveManifest();
 		}
 
 		static void Main()
@@ -68,10 +77,21 @@ namespace MusicBoxSynchronizer
 
 			Console.WriteLine("Press enter to exit");
 			Console.ReadLine();
+			Console.WriteLine("Stopping...");
+
+			foreach (var repository in s_repositories)
+			{
+				Console.WriteLine("- " + repository);
+				repository.StopMonitor();
+			}
+
+			Console.WriteLine("- Change processor");
 
 			RequestChangeProcessorStop();
 
 			WaitForChangeProcessorToExit();
+
+			Console.WriteLine("All done!");
 		}
 
 		static MonitorableRepository ResolveRepository(string repositoryType)
@@ -173,7 +193,11 @@ namespace MusicBoxSynchronizer
 
 		static void RequestChangeProcessorStop()
 		{
-			s_changeProcessorStopping = true;
+			lock (s_sync)
+			{
+				s_changeProcessorStopping = true;
+				Monitor.PulseAll(s_sync);
+			}
 		}
 
 		static void WaitForChangeProcessorIdle()
@@ -244,8 +268,11 @@ namespace MusicBoxSynchronizer
 
 						SaveChanges();
 
-						while (!s_changeProcessorQueue.TryDequeue(out change))
+						while (!s_changeProcessorQueue.TryDequeue(out change) && !s_changeProcessorStopping)
 							Monitor.Wait(s_sync);
+
+						if (change == null)
+							continue;
 
 						s_changeProcessorBusy = true;
 

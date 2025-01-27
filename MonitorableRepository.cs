@@ -21,6 +21,16 @@ namespace MusicBoxSynchronizer
 		public abstract void MoveFile(string oldPath, string newPath);
 		public abstract Stream GetFileContentStream(string path);
 
+		public virtual void RegisterFolder(string path)
+		{
+		}
+
+		public virtual void RegisterFile(ManifestFileInfo fileInfo)
+		{
+		}
+
+		public abstract void SaveManifest();
+
 		public abstract void StartMonitor();
 		public abstract void StopMonitor();
 

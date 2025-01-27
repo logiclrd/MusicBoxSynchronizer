@@ -8,6 +8,8 @@ namespace MusicBoxSynchronizer
 {
 	public class LocalFileSystemRepository : MonitorableRepository
 	{
+		public override string? ToString() => "Local Filesystem Interface";
+
 		public const string DefaultRepositoryPath = @"C:\MusicBoxDrive";
 
 		const string ManifestStateFileName = "local_drive_manifest";
@@ -75,12 +77,14 @@ namespace MusicBoxSynchronizer
 
 				var manifest = Manifest.Build(_rootPath!);
 
-				manifest.SaveTo(ManifestStateFileName);
+				manifest.HasChanges = true;
 
 				return manifest;
 			}
 
 			_manifest = TryLoadManifest() ?? BuildManifest();
+
+			SaveManifest();
 		}
 
 		public string RootPath => _rootPath;
@@ -177,9 +181,19 @@ namespace MusicBoxSynchronizer
 		{
 			OnDiagnosticOutput("Moving/renaming file: " + newPath + " (<- " + oldPath + ")");
 
+			string oldFullPath = GetFullPath(oldPath);
+			string newFullPath = GetFullPath(newPath);
+
+			bool oldExists = File.Exists(oldFullPath);
+			bool newExists = File.Exists(oldFullPath);
+
+			if (!oldExists && !newExists)
+				throw new Exception("Received file move/rename event but the file does not seem to exist: " + newPath + " (<- " + oldPath + ")");
+
 			File.Move(
 				GetFullPath(oldPath),
-				GetFullPath(newPath));
+				GetFullPath(newPath),
+				overwrite: true);
 		}
 
 		public override void RemoveFile(string path)
@@ -198,6 +212,26 @@ namespace MusicBoxSynchronizer
 			File.Copy(GetFullPath(path), temporaryLocation, overwrite: true);
 
 			return new TemporaryFileStream(temporaryLocation, FileMode.Open, FileAccess.Read);
+		}
+
+		public override void RegisterFolder(string path)
+		{
+			EnsureInitialized();
+
+			_manifest!.PopulateFolder(path, path);
+		}
+
+		public override void RegisterFile(ManifestFileInfo fileInfo)
+		{
+			EnsureInitialized();
+
+			_manifest!.PopulateFile(fileInfo, fileInfo.FilePath);
+		}
+
+		public override void SaveManifest()
+		{
+			if (_manifest?.HasChanges ?? false)
+				_manifest.SaveTo(ManifestStateFileName);
 		}
 
 		public override void StartMonitor()
@@ -269,7 +303,7 @@ namespace MusicBoxSynchronizer
 				fileSize,
 				modifiedTimeUTC);
 
-			_manifest.SaveTo(ManifestStateFileName);
+			SaveManifest();
 		}
 
 		void QueueChangedEvent(ChangeType changeType, string fullPath, string? oldFullPath = null)
@@ -395,8 +429,8 @@ namespace MusicBoxSynchronizer
 					return;
 			}
 
-			string relativePath = fullPath.Substring(_rootPath.Length + 1);
-			string? oldRelativePath = (oldFullPath == null) ? null : oldFullPath.Substring(_rootPath.Length + 1);
+			string relativePath = PathUtility.GetRelativePath(_rootPath, fullPath) ?? throw new Exception("Unable to determine relative path for full path: " + fullPath);
+			string? oldRelativePath = PathUtility.GetRelativePath(_rootPath, oldFullPath);
 
 			string md5Checksum = File.Exists(fullPath) ? MD5Utility.ComputeChecksum(fullPath) : "-";
 
@@ -407,7 +441,7 @@ namespace MusicBoxSynchronizer
 					changeType: ChangeType.Removed,
 					filePath: relativePath));
 			}
-			else if (oldFullPath == null)
+			else if (oldRelativePath == null)
 			{
 				OnChangeDetected(new ChangeInfo(
 					sourceRepository: this,
@@ -422,7 +456,7 @@ namespace MusicBoxSynchronizer
 					sourceRepository: this,
 					changeType: changeType,
 					filePath: relativePath,
-					oldFilePath: oldFullPath,
+					oldFilePath: oldRelativePath,
 					isFolder: Directory.Exists(fullPath)));
 			}
 		}

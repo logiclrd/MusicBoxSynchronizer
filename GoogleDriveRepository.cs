@@ -12,6 +12,8 @@ namespace MusicBoxSynchronizer
 {
 	public class GoogleDriveRepository : MonitorableRepository
 	{
+		public override string? ToString() => "Google Drive Interface";
+
 		DriveService? _driveService;
 		Manifest? _manifest;
 		object _sync = new object();
@@ -44,18 +46,26 @@ namespace MusicBoxSynchronizer
 
 				var manifest = Manifest.Build(_driveService!);
 
-				manifest.SaveTo(ManifestStateFileName);
+				manifest.HasChanges = true;
 
 				return manifest;
 			}
 
 			_manifest = TryLoadManifest() ?? BuildManifest();
+
+			SaveManifest();
 		}
 
 		void EnsureInitialized()
 		{
 			if ((_driveService == null) || (_manifest == null))
 				throw new InvalidOperationException("Repository is not initialized");
+		}
+
+		public override void SaveManifest()
+		{
+			if (_manifest?.HasChanges ?? false)
+				_manifest.SaveTo(ManifestStateFileName);
 		}
 
 		public void ConnectToDriveService()
@@ -148,9 +158,9 @@ namespace MusicBoxSynchronizer
 
 			var newFolder = new Google.Apis.Drive.v3.Data.File();
 
-			newFolder.Name = Path.GetFileName(path);
+			newFolder.Name = PathUtility.GetFileName(path);
 
-			if (Path.GetDirectoryName(path) is string containerPath)
+			if (PathUtility.GetParentPath(path) is string containerPath)
 			{
 				string containerFileID = CreateFolder(containerPath);
 
@@ -176,8 +186,8 @@ namespace MusicBoxSynchronizer
 
 				var file = new Google.Apis.Drive.v3.Data.File();
 
-				file.Name = Path.GetFileName(filePath);
-				file.Parents = new[] { _manifest.GetFileID(Path.GetDirectoryName(filePath) ?? "") };
+				file.Name = PathUtility.GetFileName(filePath);
+				file.Parents = new[] { _manifest.GetFileID(PathUtility.GetParentPath(filePath) ?? "") };
 
 				var createRequest = _driveService!.Files.Create(file, fileContent, "application/octet-stream");
 
@@ -189,8 +199,8 @@ namespace MusicBoxSynchronizer
 
 				var file = new Google.Apis.Drive.v3.Data.File();
 
-				file.Name = Path.GetFileName(filePath);
-				file.Parents = new[] { _manifest.GetFileID(Path.GetDirectoryName(filePath) ?? "") };
+				file.Name = PathUtility.GetFileName(filePath);
+				file.Parents = new[] { _manifest.GetFileID(PathUtility.GetParentPath(filePath) ?? "") };
 
 				var updateRequest = _driveService!.Files.Update(file, _manifest.GetFileID(filePath), fileContent, "application/octet-stream");
 
@@ -204,8 +214,13 @@ namespace MusicBoxSynchronizer
 
 			if (_manifest!.GetFileID(filePath) is string fileID)
 			{
-				OnDiagnosticOutput("Deleting file: " + filePath);
-				_driveService!.Files.Delete(fileID).Execute();
+				OnDiagnosticOutput("Moving file to trash: " + filePath);
+
+				var file = new Google.Apis.Drive.v3.Data.File();
+
+				file.Trashed = true;
+
+				_driveService!.Files.Update(file, fileID).Execute();
 			}
 		}
 
@@ -221,20 +236,18 @@ namespace MusicBoxSynchronizer
 
 			OnDiagnosticOutput("Moving/renaming file: " + newPath + " (<- " + oldPath + ")");
 
-			string oldParent = Path.GetDirectoryName(oldPath) ?? "";
-			string newParent = Path.GetDirectoryName(newPath) ?? "";
+			string oldParent = PathUtility.GetParentPath(oldPath) ?? "";
+			string newParent = PathUtility.GetParentPath(newPath) ?? "";
 
-			string oldName = Path.GetFileName(oldPath);
-			string newName = Path.GetFileName(newPath);
+			string oldName = PathUtility.GetFileName(oldPath);
+			string newName = PathUtility.GetFileName(newPath);
 
-			var getRequest = _driveService!.Files.Get(fileID);
-
-			var file = getRequest.Execute();
+			var file = new Google.Apis.Drive.v3.Data.File();
 
 			if (oldName != newName)
 				file.Name = newName;
 
-			var updateRequest = _driveService.Files.Update(file, fileID);
+			var updateRequest = _driveService!.Files.Update(file, fileID);
 
 			if (oldParent != newParent)
 			{
@@ -345,8 +358,7 @@ namespace MusicBoxSynchronizer
 
 				OnDiagnosticOutput("End of batch");
 
-				if (_manifest.HasChanges)
-					_manifest.SaveTo(ManifestStateFileName);
+				SaveManifest();
 
 				lock (_sync)
 					Monitor.Wait(_sync, TimeSpan.FromSeconds(5));

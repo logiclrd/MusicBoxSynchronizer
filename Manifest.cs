@@ -23,10 +23,6 @@ namespace MusicBoxSynchronizer
 		{
 			Manifest ret = new Manifest();
 
-			if (!localPath.EndsWith(Path.DirectorySeparatorChar)
-			 && !localPath.EndsWith(Path.AltDirectorySeparatorChar))
-				localPath += Path.DirectorySeparatorChar;
-
 			var enumeration = new FileSystemEnumerable<(FileSystemInfo Entry, string SpecifiedFullPath)>(
 				localPath,
 				(ref FileSystemEntry entry) => (entry.ToFileSystemInfo(), entry.ToSpecifiedFullPath()),
@@ -34,10 +30,10 @@ namespace MusicBoxSynchronizer
 
 			foreach (var (entry, specifiedFullPath) in enumeration)
 			{
-				if (!specifiedFullPath.StartsWith(localPath))
-					continue;
+				string? relativePath = PathUtility.GetRelativePath(localPath, specifiedFullPath);
 
-				string relativePath = specifiedFullPath.Substring(localPath.Length);
+				if (relativePath == null)
+					continue;
 
 				if (entry is DirectoryInfo)
 					ret._folders[relativePath] = relativePath;
@@ -53,6 +49,8 @@ namespace MusicBoxSynchronizer
 					ret._files[relativePath] = fileInfo;
 				}
 			}
+
+			ret.HasChanges = false;
 
 			return ret;
 		}
@@ -186,7 +184,7 @@ namespace MusicBoxSynchronizer
 						// We must recurse manually into subfolders.
 						if (file.MimeType == Constants.GoogleDriveFolderMIMEType)
 						{
-							string subPath = Path.Combine(shortcutTarget.ApparentPath, file.Name);
+							string subPath = PathUtility.Join(shortcutTarget.ApparentPath, file.Name);
 
 							ret._folders[file.Id] = subPath;
 							ret._idByPath[subPath] = file.Id;
@@ -202,7 +200,7 @@ namespace MusicBoxSynchronizer
 						{
 							if (file.ShortcutDetails.TargetMimeType == Constants.GoogleDriveFolderMIMEType)
 							{
-								string subPath = Path.Combine(shortcutTarget.ApparentPath, file.Name);
+								string subPath = PathUtility.Join(shortcutTarget.ApparentPath, file.Name);
 
 								ret._folders[file.Id] = subPath;
 								ret._idByPath[subPath] = file.Id;
@@ -329,6 +327,14 @@ namespace MusicBoxSynchronizer
 			set => _hasChanges = value;
 		}
 
+		public void PopulateFolder(string path, string fileID)
+		{
+			_folders[fileID] = path;
+			_idByPath[path] = fileID;
+
+			_hasChanges = true;
+		}
+
 		public void PopulateFile(File file, File actualFile)
 			=> PopulateFile(file, file.Parents?.SingleOrDefault(), actualFile);
 
@@ -336,8 +342,15 @@ namespace MusicBoxSynchronizer
 		{
 			var fileInfo = ManifestFileInfo.Build(file, parentFileID, actualFile, this);
 
-			_files[file.Id] = fileInfo;
-			_idByPath[fileInfo.FilePath] = file.Id;
+			PopulateFile(fileInfo, file.Id);
+		}
+
+		public void PopulateFile(ManifestFileInfo fileInfo, string fileID)
+		{
+			_files[fileID] = fileInfo;
+			_idByPath[fileInfo.FilePath] = fileID;
+
+			_hasChanges = true;
 		}
 
 		public string? GetFolderPath(string id)
@@ -479,8 +492,8 @@ namespace MusicBoxSynchronizer
 					newFileInfo.FileSize = fileSize;
 					newFileInfo.ModifiedTimeUTC = modifiedTimeUTC;
 
-					string fileName = Path.GetFileName(changeInfo.FilePath);
-					string containerPath = Path.GetDirectoryName(changeInfo.FilePath) ?? "";
+					string fileName = PathUtility.GetFileName(changeInfo.FilePath);
+					string containerPath = PathUtility.GetParentPath(changeInfo.FilePath) ?? "";
 
 					RegisterChange(newFileInfo, fileID, fileName, "application/octet-stream", GetFileID(containerPath), changeInfo.SourceRepository);
 				}
