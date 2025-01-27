@@ -15,6 +15,8 @@ namespace MusicBoxSynchronizer
 		public readonly string? OldMD5Checksum;
 		public readonly bool IsFolder;
 
+		public bool IsFile => !IsFolder;
+
 		public override bool Equals(object? obj)
 		{
 			if (obj is ChangeInfo changeInfo)
@@ -25,11 +27,21 @@ namespace MusicBoxSynchronizer
 
 		public bool Equals(ChangeInfo other)
 		{
-			return
-				(this.ChangeType == other.ChangeType) &&
-				(this.FilePath == other.FilePath) &&
-				(this.MD5Checksum == other.MD5Checksum) &&
-				(this.IsFolder == other.IsFolder);
+			if (this.ChangeType == ChangeType.Removed)
+			{
+				return
+					(this.ChangeType == other.ChangeType) &&
+					(this.FilePath == other.FilePath) &&
+					(this.IsFolder == other.IsFolder);
+			}
+			else
+			{
+				return
+					(this.ChangeType == other.ChangeType) &&
+					(this.FilePath == other.FilePath) &&
+					(this.MD5Checksum == other.MD5Checksum) &&
+					(this.IsFolder == other.IsFolder);
+			}
 		}
 
 		public override int GetHashCode()
@@ -75,7 +87,7 @@ namespace MusicBoxSynchronizer
 			MD5Checksum = md5Checksum;
 		}
 
-		public ChangeInfo(MonitorableRepository sourceRepository, ChangeType changeType, string filePath, string oldFilePath, string md5Checksum, string oldMD5Checksum)
+		public ChangeInfo(MonitorableRepository sourceRepository, ChangeType changeType, string filePath, string oldFilePath, string md5Checksum, string? oldMD5Checksum)
 		{
 			SourceRepository = sourceRepository;
 			ChangeType = changeType;

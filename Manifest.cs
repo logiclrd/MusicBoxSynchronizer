@@ -365,14 +365,14 @@ namespace MusicBoxSynchronizer
 		}
 
 		public ChangeInfo? RegisterChange(Change change, MonitorableRepository sourceRepository)
-			=> ((change.Removed ?? false) || (change.File.Trashed ?? false))
-				? RegisterRemoval(change.FileId, change.File.Md5Checksum, sourceRepository)
-				: RegisterChange(change.File, sourceRepository);
+			=> ((change.Removed ?? false) || (change.File?.Trashed ?? false))
+				? RegisterRemoval(change.FileId, sourceRepository)
+				: RegisterChange(change.File!, sourceRepository);
 
 		public ChangeInfo RegisterChange(File file, MonitorableRepository sourceRepository)
 			=> RegisterChange(ManifestFileInfo.Build(file, this), file.Id, file.Name, file.MimeType, file.Parents?.SingleOrDefault(), sourceRepository);
 
-		ChangeInfo? RegisterRemoval(string fileID, string? fileMD5Checksum, MonitorableRepository sourceRepository)
+		ChangeInfo? RegisterRemoval(string fileID, MonitorableRepository sourceRepository)
 		{
 			if (_files.TryGetValue(fileID, out var removedFile))
 			{
@@ -384,7 +384,7 @@ namespace MusicBoxSynchronizer
 					sourceRepository: sourceRepository,
 					changeType: ChangeType.Removed,
 					filePath: removedFile?.FilePath ?? "<unknown>",
-					md5Checksum: fileMD5Checksum ?? removedFile?.MD5Checksum ?? "<unknown>");
+					md5Checksum: removedFile?.MD5Checksum ?? "<unknown>");
 			}
 
 			if (_folders.TryGetValue(fileID, out var removedFolderPath))
@@ -405,44 +405,46 @@ namespace MusicBoxSynchronizer
 
 		public ChangeInfo RegisterChange(ManifestFileInfo newFileInfo, string fileID, string fileName, string fileMIMEType, string? fileParentFileID, MonitorableRepository sourceRepository)
 		{
-			if (fileMIMEType != Constants.GoogleDriveFolderMIMEType)
+			string container = "";
+
+			if (fileParentFileID != null)
 			{
-				string container = "";
+				_folders.TryGetValue(fileParentFileID, out var containerPath);
 
-				if (fileParentFileID != null)
-				{
-					_folders.TryGetValue(fileParentFileID, out var containerPath);
+				if (containerPath != null)
+					container = containerPath + "/";
+			}
 
-					if (containerPath != null)
-						container = containerPath + "/";
-				}
+			string newItemPath = container + fileName;
 
-				string newFolderPath = container + fileName;
-
+			if (fileMIMEType == Constants.GoogleDriveFolderMIMEType)
+			{
 				try
 				{
-					if (_folders.TryGetValue(fileID, out var oldFolderPath)
-					 && (oldFolderPath != newFolderPath))
+					bool fileIDExists = _folders.TryGetValue(fileID, out var oldFolderPath);
+
+					if (fileIDExists && (oldFolderPath != newItemPath))
 					{
 						return new ChangeInfo(
 							sourceRepository: sourceRepository,
 							changeType: ChangeType.Moved,
-							filePath: newFolderPath,
-							oldFilePath: oldFolderPath,
+							filePath: newItemPath,
+							oldFilePath: oldFolderPath!,
 							isFolder: true);
 					}
 					else
 					{
 						return new ChangeInfo(
 							sourceRepository: sourceRepository,
-							changeType: ChangeType.Created,
-							filePath: newFolderPath,
+							changeType: fileIDExists ? ChangeType.Modified : ChangeType.Created,
+							filePath: newItemPath,
 							isFolder: true);
 					}
 				}
 				finally
 				{
-					_folders[fileID] = newFolderPath;
+					_folders[fileID] = newItemPath;
+					_idByPath[newItemPath] = fileID;
 					_hasChanges = true;
 				}
 			}
@@ -458,6 +460,7 @@ namespace MusicBoxSynchronizer
 				finally
 				{
 					_files[fileID] = newFileInfo;
+					_idByPath[newFileInfo.FilePath] = fileID;
 					_hasChanges = true;
 				}
 			}
@@ -468,7 +471,7 @@ namespace MusicBoxSynchronizer
 			if (_idByPath.TryGetValue(changeInfo.FilePath, out var fileID))
 			{
 				if (changeInfo.ChangeType == ChangeType.Removed)
-					RegisterRemoval(fileID, changeInfo.MD5Checksum, changeInfo.SourceRepository);
+					RegisterRemoval(fileID, changeInfo.SourceRepository);
 				else
 				{
 					var newFileInfo = new ManifestFileInfo(changeInfo.FilePath, changeInfo.MD5Checksum);

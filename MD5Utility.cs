@@ -9,7 +9,7 @@ namespace MusicBoxSynchronizer
 	{
 		public static string ComputeChecksum(string filePath)
 		{
-			using (var stream = File.OpenRead(filePath))
+			using (var stream = new FileStream(filePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
 				return ComputeChecksum(stream);
 		}
 

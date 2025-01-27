@@ -13,6 +13,9 @@ namespace MusicBoxSynchronizer
 		public abstract IEnumerable<ManifestFileInfo> EnumerateFiles();
 
 		public abstract string CreateFolder(string path);
+		public abstract void MoveFolder(string oldPath, string newPath);
+		public abstract void RemoveFolder(string path);
+
 		public abstract void CreateOrUpdateFile(string path, Stream content);
 		public abstract void RemoveFile(string path);
 		public abstract void MoveFile(string oldPath, string newPath);

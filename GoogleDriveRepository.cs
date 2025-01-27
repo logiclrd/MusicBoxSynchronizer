@@ -52,10 +52,10 @@ namespace MusicBoxSynchronizer
 			_manifest = TryLoadManifest() ?? BuildManifest();
 		}
 
-		void EnsureConnected()
+		void EnsureInitialized()
 		{
 			if ((_driveService == null) || (_manifest == null))
-				throw new InvalidOperationException("Repository is not connected");
+				throw new InvalidOperationException("Repository is not initialized");
 		}
 
 		public void ConnectToDriveService()
@@ -92,7 +92,7 @@ namespace MusicBoxSynchronizer
 
 		public override bool DoesFolderExist(string path)
 		{
-			EnsureConnected();
+			EnsureInitialized();
 
 			return
 				(_manifest!.GetFileID(path) is string fileID) &&
@@ -102,7 +102,7 @@ namespace MusicBoxSynchronizer
 
 		public override bool DoesFileExist(ManifestFileInfo fileInfo)
 		{
-			EnsureConnected();
+			EnsureInitialized();
 
 			if (!(_manifest!.GetFileID(fileInfo.FilePath) is string fileID))
 				return false;
@@ -118,21 +118,21 @@ namespace MusicBoxSynchronizer
 
 		public override IEnumerable<string> EnumerateFolders()
 		{
-			EnsureConnected();
+			EnsureInitialized();
 
 			return _manifest!.EnumerateFolders();
 		}
 
 		public override IEnumerable<ManifestFileInfo> EnumerateFiles()
 		{
-			EnsureConnected();
+			EnsureInitialized();
 
 			return _manifest!.EnumerateFiles();
 		}
 
 		public override string CreateFolder(string path)
 		{
-			EnsureConnected();
+			EnsureInitialized();
 
 			if (_manifest!.GetFileID(path) is string fileID)
 			{
@@ -168,7 +168,7 @@ namespace MusicBoxSynchronizer
 
 		public override void CreateOrUpdateFile(string filePath, Stream fileContent)
 		{
-			EnsureConnected();
+			EnsureInitialized();
 
 			if (_manifest!.GetFileInfo(filePath) is not ManifestFileInfo)
 			{
@@ -200,12 +200,12 @@ namespace MusicBoxSynchronizer
 
 		public override void RemoveFile(string filePath)
 		{
-			EnsureConnected();
+			EnsureInitialized();
 
 			if (_manifest!.GetFileID(filePath) is string fileID)
 			{
 				OnDiagnosticOutput("Deleting file: " + filePath);
-				_driveService!.Files.Delete(fileID);
+				_driveService!.Files.Delete(fileID).Execute();
 			}
 		}
 
@@ -214,7 +214,7 @@ namespace MusicBoxSynchronizer
 			if (oldPath == newPath)
 				return;
 
-			EnsureConnected();
+			EnsureInitialized();
 
 			if (!(_manifest!.GetFileID(oldPath) is string fileID))
 				throw new Exception("No file was found with the specified path: " + oldPath);
@@ -245,9 +245,15 @@ namespace MusicBoxSynchronizer
 			updateRequest.Execute();
 		}
 
+		public override void MoveFolder(string oldPath, string newPath)
+			=> MoveFile(oldPath, newPath);
+
+		public override void RemoveFolder(string path)
+			=> RemoveFile(path);
+
 		public override Stream GetFileContentStream(string path)
 		{
-			EnsureConnected();
+			EnsureInitialized();
 
 			if (!(_manifest!.GetFileID(path) is string fileID))
 				throw new FileNotFoundException("No file was found with the specified path: " + path);
@@ -304,7 +310,7 @@ namespace MusicBoxSynchronizer
 
 					var request = _driveService.Changes.List(_manifest.PageToken);
 
-					request.Fields = "newStartPageToken, changes(removed, fileId, file(id, name, size, modifiedTime, md5Checksum, trashed))";
+					request.Fields = "newStartPageToken, changes(removed, fileId, file(id, name, size, modifiedTime, md5Checksum, parents, mimeType, trashed))";
 
 					request.IncludeRemoved = true;
 
@@ -323,6 +329,8 @@ namespace MusicBoxSynchronizer
 								OnDiagnosticOutput($"  * {changeInfo.ChangeType}: {changeInfo.FilePath}");
 							else
 								OnDiagnosticOutput($"  * {changeInfo.ChangeType}: {changeInfo.FilePath} (<- {changeInfo.OldFilePath})");
+
+							OnChangeDetected(changeInfo);
 						}
 					}
 

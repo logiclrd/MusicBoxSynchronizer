@@ -178,16 +178,16 @@ namespace MusicBoxSynchronizer
 
 		static void WaitForChangeProcessorIdle()
 		{
-			lock (s_changeProcessorSync)
+			lock (s_sync)
 				while (s_changeProcessorBusy || s_changeProcessorQueue.Any())
-					Monitor.Wait(s_changeProcessorSync);
+					Monitor.Wait(s_sync);
 		}
 
 		static void WaitForChangeProcessorToExit()
 		{
-			lock (s_changeProcessorSync)
+			lock (s_sync)
 				while (s_changeProcessorRunning)
-					Monitor.Wait(s_changeProcessorSync);
+					Monitor.Wait(s_sync);
 		}
 
 		class ChangeEvent
@@ -223,7 +223,6 @@ namespace MusicBoxSynchronizer
 		static Queue<ChangeInfo> s_changeProcessorQueue = new Queue<ChangeInfo>();
 		static List<ChangeEvent> s_recentChanges = new List<ChangeEvent>();
 		static bool s_changeProcessorStopping;
-		static object s_changeProcessorSync = new object();
 		static bool s_changeProcessorRunning;
 		static bool s_changeProcessorBusy;
 
@@ -249,6 +248,25 @@ namespace MusicBoxSynchronizer
 							Monitor.Wait(s_sync);
 
 						s_changeProcessorBusy = true;
+
+						if ((change.ChangeType == ChangeType.Created)
+						 || (change.ChangeType == ChangeType.Removed))
+						{
+							var forgetChangeType = (change.ChangeType == ChangeType.Created)
+								? ChangeType.Removed
+								: ChangeType.Created;
+
+							for (int i = s_recentChanges.Count - 1; i >= 0; i--)
+							{
+								var previousChange = s_recentChanges[i];
+
+								if ((previousChange.ChangeInfo.FilePath == change.FilePath)
+								 && (previousChange.ChangeInfo.ChangeType == forgetChangeType))
+									s_recentChanges.RemoveAt(i);
+							}
+						}
+
+						s_recentChanges.Add(new ChangeEvent(change));
 					}
 
 					if (change == null)
@@ -263,11 +281,11 @@ namespace MusicBoxSynchronizer
 			}
 			finally
 			{
-				lock (s_changeProcessorSync)
+				lock (s_sync)
 				{
 					s_changeProcessorBusy = false;
 					s_changeProcessorRunning = false;
-					Monitor.PulseAll(s_changeProcessorSync);
+					Monitor.PulseAll(s_sync);
 				}
 			}
 		}
@@ -278,22 +296,43 @@ namespace MusicBoxSynchronizer
 			{
 				if (repository != change.SourceRepository)
 				{
-					switch (change.ChangeType)
+					if (change.IsFile)
 					{
-						case ChangeType.Created:
-						case ChangeType.Modified:
-							using (var contentStream = change.SourceRepository.GetFileContentStream(change.FilePath))
-								repository.CreateOrUpdateFile(change.FilePath, contentStream);
-							break;
-						case ChangeType.Moved:
-						case ChangeType.Renamed:
-							repository.MoveFile(
-								change.OldFilePath ?? throw new Exception(change.ChangeType + " change event was created without OldFilePath"),
-								change.FilePath);
-							break;
-						case ChangeType.Removed:
-							repository.RemoveFile(change.FilePath);
-							break;
+						switch (change.ChangeType)
+						{
+							case ChangeType.Created:
+							case ChangeType.Modified:
+								using (var contentStream = change.SourceRepository.GetFileContentStream(change.FilePath))
+									repository.CreateOrUpdateFile(change.FilePath, contentStream);
+								break;
+							case ChangeType.Moved:
+							case ChangeType.Renamed:
+								repository.MoveFile(
+									change.OldFilePath ?? throw new Exception(change.ChangeType + " change event was created without OldFilePath"),
+									change.FilePath);
+								break;
+							case ChangeType.Removed:
+								repository.RemoveFile(change.FilePath);
+								break;
+						}
+					}
+					else
+					{
+						switch (change.ChangeType)
+						{
+							case ChangeType.Created:
+								repository.CreateFolder(change.FilePath);
+								break;
+							case ChangeType.Moved:
+							case ChangeType.Renamed:
+								repository.MoveFolder(
+									change.OldFilePath ?? throw new Exception(change.ChangeType + " change event was created without OldFilePath"),
+									change.FilePath);
+								break;
+							case ChangeType.Removed:
+								repository.RemoveFolder(change.FilePath);
+								break;
+						}
 					}
 				}
 			}
