@@ -1,368 +1,63 @@
 using System;
-using System.Collections.Generic;
-using System.IO;
-using System.Linq;
-using System.Threading;
+using System.Diagnostics;
+using System.ServiceProcess;
 
 namespace MusicBoxSynchronizer
 {
 	public class Program
 	{
-		static GoogleDriveRepository s_googleDriveRepository = new GoogleDriveRepository();
-		static LocalFileSystemRepository s_localFileSystemRepository = new LocalFileSystemRepository();
-
-		static MonitorableRepository[] s_repositories =
-			[
-				s_googleDriveRepository,
-				s_localFileSystemRepository,
-			];
-
-		static Dictionary<string, MonitorableRepository> s_repositoryByType = s_repositories.ToDictionary(r => r.GetType().Name);
-
-		static void WireUpDiagnosticOutput()
+		static int Main(string[] args)
 		{
-			foreach (var repository in s_repositories)
-			{
-				string prefix = "[" + repository.GetType().Name + "] ";
+			int _exitCode = 0;
 
-				repository.DiagnosticOutput += (_, text) => Console.WriteLine(prefix + text);
-			}
-		}
-
-		static void EnsureInitialStateOfLocalFiles()
-		{
-			foreach (var folderPath in s_googleDriveRepository.EnumerateFolders())
-				if (!s_localFileSystemRepository.DoesFolderExist(folderPath))
+			AppDomain.CurrentDomain.UnhandledException +=
+				(_, e) =>
 				{
-					s_localFileSystemRepository.CreateFolder(folderPath);
-					s_localFileSystemRepository.RegisterFolder(folderPath);
-				}
+					Console.Error.WriteLine("UNHANDLED EXCEPTION: {0}", e);
 
-			foreach (var fileInfo in s_googleDriveRepository.EnumerateFiles())
-				if (!s_localFileSystemRepository.DoesFileExist(fileInfo))
+					if (OperatingSystem.IsWindows())
+						EventLog.WriteEntry("MusicBoxSynchronizer", "Unhandled exception:\n\n" + e, EventLogEntryType.Error);
+
+					_exitCode = 1;
+				};
+
+			switch (args[0])
+			{
+				case "/service":
 				{
-					using (var contentStream = s_googleDriveRepository.GetFileContentStream(fileInfo.FilePath))
-						s_localFileSystemRepository.CreateOrUpdateFile(fileInfo.FilePath, contentStream);
+					if (!OperatingSystem.IsWindows())
+					{
+						Console.Error.WriteLine("error: /service mode is only available on Windows");
+						_exitCode = 3;
+						break;
+					}
 
-					s_localFileSystemRepository.RegisterFile(fileInfo);
-				}
+					ServiceBase.Run(new Service());
 
-			s_localFileSystemRepository.SaveManifest();
-		}
-
-		static void Main()
-		{
-			WireUpDiagnosticOutput();
-
-			s_googleDriveRepository.Initialize();
-			s_localFileSystemRepository.Initialize();
-
-			LoadChanges();
-
-			StartChangeProcessor();
-
-			WaitForChangeProcessorIdle();
-
-			EnsureInitialStateOfLocalFiles();
-
-			foreach (var repository in s_repositories)
-			{
-				repository.ChangeDetected +=
-					(sender, change) => QueueChangeForProcessing(change);
-
-				repository.StartMonitor();
-			}
-
-			// TODO: proper service scaffolding
-
-			Console.WriteLine("Press enter to exit");
-			Console.ReadLine();
-			Console.WriteLine("Stopping...");
-
-			foreach (var repository in s_repositories)
-			{
-				Console.WriteLine("- " + repository);
-				repository.StopMonitor();
-			}
-
-			Console.WriteLine("- Change processor");
-
-			RequestChangeProcessorStop();
-
-			WaitForChangeProcessorToExit();
-
-			Console.WriteLine("All done!");
-		}
-
-		static MonitorableRepository ResolveRepository(string repositoryType)
-		{
-			if (s_repositoryByType.TryGetValue(repositoryType, out var repository))
-				return repository;
-
-			throw new Exception("Can't resolve repository of type: " + repositoryType);
-		}
-
-		static void SaveChanges()
-		{
-			using (var writer = new StreamWriter("changes"))
-			{
-				writer.WriteLine(s_changeProcessorQueue.Count);
-
-				foreach (var change in s_changeProcessorQueue)
-					writer.WriteLine(change.ToString());
-			}
-		}
-
-		static void LoadChanges()
-		{
-			if (!File.Exists("changes"))
-				return;
-
-			using (var reader = new StreamReader("changes"))
-			{
-				string countString = reader.ReadLine() ?? throw new Exception("Unexpected EOF in changes file");
-
-				if (int.TryParse(countString, out var count))
-				{
-					s_changeProcessorQueue.Clear();
-
-					for (int i=0; i < count; i++)
-						s_changeProcessorQueue.Enqueue(ChangeInfo.FromString(reader.ReadLine() ?? throw new Exception("Unexpected EOF in changes file"), ResolveRepository));
-				}
-			}
-		}
-
-		static bool IsRecentChange(ChangeInfo change)
-		{
-			var cutoff = DateTime.UtcNow.AddMinutes(-1);
-
-			while (s_recentChanges.Count > 0)
-			{
-				var oldestChange = s_recentChanges.First();
-
-				if (oldestChange.TimestampUTC < cutoff)
-					s_recentChanges.RemoveAt(0);
-				else
 					break;
-			}
-
-			return s_recentChanges.Any(evt => evt.ChangeInfo.Equals(change));
-		}
-
-		static void QueueChangeForProcessing(ChangeInfo change)
-		{
-			lock (s_sync)
-			{
-				if (change.ChangeType == ChangeType.MovedAndModified)
-				{
-					QueueChangeForProcessing(new ChangeInfo(
-						change.SourceRepository,
-						ChangeType.Created,
-						change.FilePath,
-						change.IsFolder,
-						change.MD5Checksum));
-
-					QueueChangeForProcessing(new ChangeInfo(
-						change.SourceRepository,
-						ChangeType.Removed,
-						change.OldFilePath ?? throw new Exception("MovedAndModified change event was created without OldFilePath"),
-						change.IsFolder,
-						change.OldMD5Checksum ?? throw new Exception("MovedAndModified change event was created without OldMD5Checksum")));
-
-					return;
 				}
-
-				if (!IsRecentChange(change))
+				case "/console":
 				{
-					s_changeProcessorQueue.Enqueue(change);
-					Monitor.PulseAll(s_sync);
+					var service = new Service();
 
-					SaveChanges();
+					service.StartDirect();
+
+					Console.WriteLine("Press enter to stop service");
+					Console.ReadLine();
+
+					service.StopDirect();
+
+					break;
+				}
+				default:
+				{
+					Console.Error.WriteLine("usage: MusicBoxSynchronizer { /service | /console }");
+					_exitCode = 2;
+					break;
 				}
 			}
-		}
 
-		static void StartChangeProcessor()
-		{
-			var thread = new Thread(ChangeProcessorThreadProc);
-
-			s_changeProcessorStopping = false;
-
-			thread.Start();
-		}
-
-		static void RequestChangeProcessorStop()
-		{
-			lock (s_sync)
-			{
-				s_changeProcessorStopping = true;
-				Monitor.PulseAll(s_sync);
-			}
-		}
-
-		static void WaitForChangeProcessorIdle()
-		{
-			lock (s_sync)
-				while (s_changeProcessorBusy || s_changeProcessorQueue.Any())
-					Monitor.Wait(s_sync);
-		}
-
-		static void WaitForChangeProcessorToExit()
-		{
-			lock (s_sync)
-				while (s_changeProcessorRunning)
-					Monitor.Wait(s_sync);
-		}
-
-		class ChangeEvent
-		{
-			public ChangeInfo ChangeInfo;
-			public DateTime TimestampUTC;
-
-			public ChangeEvent(ChangeInfo changeInfo)
-			{
-				ChangeInfo = changeInfo;
-				TimestampUTC = DateTime.UtcNow;
-			}
-
-			public override string ToString()
-			{
-				return TimestampUTC.Ticks + " " + ChangeInfo.ToString();
-			}
-
-			public static ChangeEvent FromString(string str)
-			{
-				string[] parts = str.Split(' ', count: 2);
-
-				var ret = new ChangeEvent(ChangeInfo.FromString(parts[1], ResolveRepository));
-
-				if (long.TryParse(parts[0], out var timestampTicks))
-					ret.TimestampUTC = new DateTime(timestampTicks, DateTimeKind.Utc);
-
-				return ret;
-			}
-		}
-
-		static object s_sync = new object();
-		static Queue<ChangeInfo> s_changeProcessorQueue = new Queue<ChangeInfo>();
-		static List<ChangeEvent> s_recentChanges = new List<ChangeEvent>();
-		static bool s_changeProcessorStopping;
-		static bool s_changeProcessorRunning;
-		static bool s_changeProcessorBusy;
-
-		static void ChangeProcessorThreadProc()
-		{
-			try
-			{
-				s_changeProcessorRunning = true;
-
-				while (s_changeProcessorQueue.Any() || !s_changeProcessorStopping)
-				{
-					ChangeInfo? change;
-
-					lock (s_sync)
-					{
-						s_changeProcessorBusy = false;
-
-						Monitor.PulseAll(s_sync);
-
-						SaveChanges();
-
-						while (!s_changeProcessorQueue.TryDequeue(out change) && !s_changeProcessorStopping)
-							Monitor.Wait(s_sync);
-
-						if (change == null)
-							continue;
-
-						s_changeProcessorBusy = true;
-
-						if ((change.ChangeType == ChangeType.Created)
-						 || (change.ChangeType == ChangeType.Removed))
-						{
-							var forgetChangeType = (change.ChangeType == ChangeType.Created)
-								? ChangeType.Removed
-								: ChangeType.Created;
-
-							for (int i = s_recentChanges.Count - 1; i >= 0; i--)
-							{
-								var previousChange = s_recentChanges[i];
-
-								if ((previousChange.ChangeInfo.FilePath == change.FilePath)
-								 && (previousChange.ChangeInfo.ChangeType == forgetChangeType))
-									s_recentChanges.RemoveAt(i);
-							}
-						}
-
-						s_recentChanges.Add(new ChangeEvent(change));
-					}
-
-					if (change == null)
-						continue;
-
-					ProcessChange(change);
-				}
-			}
-			catch (Exception e)
-			{
-				File.WriteAllText("change_processor_thread_crash", e.ToString());
-			}
-			finally
-			{
-				lock (s_sync)
-				{
-					s_changeProcessorBusy = false;
-					s_changeProcessorRunning = false;
-					Monitor.PulseAll(s_sync);
-				}
-			}
-		}
-
-		static void ProcessChange(ChangeInfo change)
-		{
-			foreach (var repository in s_repositories)
-			{
-				if (repository != change.SourceRepository)
-				{
-					if (change.IsFile)
-					{
-						switch (change.ChangeType)
-						{
-							case ChangeType.Created:
-							case ChangeType.Modified:
-								using (var contentStream = change.SourceRepository.GetFileContentStream(change.FilePath))
-									repository.CreateOrUpdateFile(change.FilePath, contentStream);
-								break;
-							case ChangeType.Moved:
-							case ChangeType.Renamed:
-								repository.MoveFile(
-									change.OldFilePath ?? throw new Exception(change.ChangeType + " change event was created without OldFilePath"),
-									change.FilePath);
-								break;
-							case ChangeType.Removed:
-								repository.RemoveFile(change.FilePath);
-								break;
-						}
-					}
-					else
-					{
-						switch (change.ChangeType)
-						{
-							case ChangeType.Created:
-								repository.CreateFolder(change.FilePath);
-								break;
-							case ChangeType.Moved:
-							case ChangeType.Renamed:
-								repository.MoveFolder(
-									change.OldFilePath ?? throw new Exception(change.ChangeType + " change event was created without OldFilePath"),
-									change.FilePath);
-								break;
-							case ChangeType.Removed:
-								repository.RemoveFolder(change.FilePath);
-								break;
-						}
-					}
-				}
-			}
+			return _exitCode;
 		}
 	}
 }
