@@ -1,5 +1,6 @@
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.ServiceProcess;
 
 namespace MusicBoxSynchronizer
@@ -8,6 +9,8 @@ namespace MusicBoxSynchronizer
 	{
 		static int Main(string[] args)
 		{
+			Environment.CurrentDirectory = Path.GetDirectoryName(typeof(Program).Assembly.Location) ?? ".";
+
 			int _exitCode = 0;
 
 			AppDomain.CurrentDomain.UnhandledException +=
