@@ -85,7 +85,7 @@ namespace MusicBoxSynchronizer
 					scopes,
 					"user",
 					CancellationToken.None,
-					new FileDataStore("MusicBoxSynchronizer/credentials", false));
+					new FileDataStore("google_drive_credentials", true));
 
 				userCredentialsTask.ConfigureAwait(false);
 

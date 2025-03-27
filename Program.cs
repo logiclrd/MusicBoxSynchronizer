@@ -24,7 +24,12 @@ namespace MusicBoxSynchronizer
 					_exitCode = 1;
 				};
 
-			switch (args[0])
+			var service = new Service();
+
+
+			string runModeArgument = (args.Length > 0) ? args[0] : "/?";
+
+			switch (runModeArgument)
 			{
 				case "/service":
 				{
@@ -35,14 +40,12 @@ namespace MusicBoxSynchronizer
 						break;
 					}
 
-					ServiceBase.Run(new Service());
+					ServiceBase.Run(service);
 
 					break;
 				}
 				case "/console":
 				{
-					var service = new Service();
-
 					service.StartDirect();
 
 					Console.WriteLine("Press enter to stop service");
