@@ -308,6 +308,21 @@ namespace MusicBoxSynchronizer
 		public IEnumerable<string> EnumerateFolders() => _folders.Values;
 		public IEnumerable<ManifestFileInfo> EnumerateFiles() => _files.Values;
 
+		public IEnumerable<ManifestFileInfo> EnumerateContents(string folderPath, bool recursive = true)
+		{
+			if (!folderPath.EndsWith("/"))
+				folderPath += "/";
+
+			foreach (var fileInfo in _files.Values)
+			{
+				if (fileInfo.FilePath.StartsWith(folderPath))
+				{
+					if (recursive || (fileInfo.FilePath.IndexOf('/', folderPath.Length) < 0))
+						yield return fileInfo;
+				}
+			}
+		}
+
 		public string PageToken
 		{
 			get => _pageToken;

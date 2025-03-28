@@ -17,6 +17,7 @@ namespace MusicBoxSynchronizer
 		string _rootPath;
 		Manifest? _manifest;
 		FileSystemWatcher? _watcher;
+		Dictionary<string, DateTime> _lastSelfChangeToPath = new Dictionary<string, DateTime>();
 
 		public LocalFileSystemRepository()
 			: this(DefaultRepositoryPath)
@@ -154,6 +155,22 @@ namespace MusicBoxSynchronizer
 		{
 			OnDiagnosticOutput($"Moving folder: {newPath} (<- {oldPath})");
 
+			var contentItems = _manifest!.EnumerateContents(oldPath).ToList();
+
+			foreach (var fileInfo in contentItems)
+			{
+				string relativePath = fileInfo.FilePath.Substring(oldPath.Length);
+				string newSubpath = newPath + relativePath;
+
+				_lastSelfChangeToPath[fileInfo.FilePath] = DateTime.UtcNow;
+				_lastSelfChangeToPath[newSubpath] = DateTime.UtcNow;
+
+				_manifest.RegisterChange(
+					new ChangeInfo(this, ChangeType.Moved, newSubpath, fileInfo.FilePath, isFolder: false, fileInfo.MD5Checksum),
+					fileSize: fileInfo.FileSize,
+					modifiedTimeUTC: fileInfo.ModifiedTimeUTC);
+			}
+
 			Directory.Move(
 				GetFullPath(oldPath),
 				GetFullPath(newPath));
@@ -163,6 +180,17 @@ namespace MusicBoxSynchronizer
 		{
 			OnDiagnosticOutput("Removing folder: " + path);
 
+			var contentItems = _manifest!.EnumerateContents(path).ToList();
+
+			foreach (var fileInfo in contentItems)
+			{
+				_lastSelfChangeToPath[fileInfo.FilePath] = DateTime.UtcNow;
+				_manifest.RegisterChange(
+					new ChangeInfo(this, ChangeType.Removed, fileInfo.FilePath, isFolder: false),
+					fileSize: fileInfo.FileSize,
+					modifiedTimeUTC: fileInfo.ModifiedTimeUTC);
+			}
+
 			Directory.Delete(GetFullPath(path), recursive: true);
 		}
 
@@ -170,10 +198,19 @@ namespace MusicBoxSynchronizer
 		{
 			OnDiagnosticOutput("Creating or updating file: " + path);
 
-			using (var fileStream = File.OpenWrite(GetFullPath(path)))
+			_lastSelfChangeToPath[path] = DateTime.UtcNow;
+
+			using (var fileStream = File.Open(GetFullPath(path), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite))
 			{
 				content.CopyTo(fileStream);
 				fileStream.SetLength(fileStream.Position);
+
+				fileStream.Position = 0;
+
+				_manifest!.RegisterChange(
+					new ChangeInfo(this, ChangeType.Modified, path, isFolder: false, MD5Utility.ComputeChecksum(fileStream)),
+					fileSize: fileStream.Length,
+					modifiedTimeUTC: DateTime.UtcNow);
 			}
 		}
 
@@ -190,17 +227,35 @@ namespace MusicBoxSynchronizer
 			if (!oldExists && !newExists)
 				throw new Exception("Received file move/rename event but the file does not seem to exist: " + newPath + " (<- " + oldPath + ")");
 
+			_lastSelfChangeToPath[oldPath] = DateTime.UtcNow;
+			_lastSelfChangeToPath[newPath] = DateTime.UtcNow;
+
 			File.Move(
 				GetFullPath(oldPath),
 				GetFullPath(newPath),
 				overwrite: true);
+
+			if (_manifest!.GetFileInfo(oldPath) is ManifestFileInfo fileInfo)
+			{
+				_manifest.RegisterChange(
+					new ChangeInfo(this, ChangeType.Moved, newPath, oldPath, isFolder: false, fileInfo.MD5Checksum),
+					fileSize: fileInfo.FileSize,
+					modifiedTimeUTC: fileInfo.ModifiedTimeUTC);
+			}
 		}
 
 		public override void RemoveFile(string path)
 		{
 			OnDiagnosticOutput("Removing file: " + path);
 
+			_lastSelfChangeToPath[path] = DateTime.UtcNow;
+
 			File.Delete(GetFullPath(path));
+
+			_manifest!.RegisterChange(
+				new ChangeInfo(this, ChangeType.Removed, path, isFolder: false),
+				fileSize: -1,
+				modifiedTimeUTC: default);
 		}
 
 		public override Stream GetFileContentStream(string path)
@@ -285,6 +340,8 @@ namespace MusicBoxSynchronizer
 		{
 			base.OnChangeDetected(change);
 
+OnDiagnosticOutput("Processing change to local file: " + change.ChangeType + " " + change.FilePath);
+
 			string fullPath = GetFullPath(change.FilePath);
 
 			long fileSize = -1;
@@ -297,6 +354,8 @@ namespace MusicBoxSynchronizer
 				fileSize = fileInfo.Length;
 				modifiedTimeUTC = fileInfo.LastWriteTimeUtc;
 			}
+
+OnDiagnosticOutput("Registering change with the local files manifest");
 
 			_manifest!.RegisterChange(
 				change,
