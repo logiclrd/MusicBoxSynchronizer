@@ -1,0 +1,18 @@
+{
+    "version": "0.2.0",
+    "configurations":
+    [
+        {
+            "type": "coreclr",
+            "name": "Debug Synchronizer",
+            "request": "launch",
+            "preLaunchTask": "build",
+            "program": "c:/code/MusicBoxSynchronizer/bin/Debug/net8.0/MusicBoxSynchronizer.exe",
+            "args": ["/console"],
+            "cwd": "c:/code/MusicBoxSynchronizer",
+            "console": "internalConsole",
+            "stopAtEntry": false
+        }
+
+    ]
+} 

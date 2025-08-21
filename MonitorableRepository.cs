@@ -7,10 +7,10 @@ namespace MusicBoxSynchronizer
 	public abstract class MonitorableRepository
 	{
 		public abstract bool DoesFolderExist(string path);
-		public abstract bool DoesFileExist(ManifestFileInfo fileInfo);
+		public abstract bool DoesFileExist(ManifestFileInfo fileInfo, bool requireExactFile);
 
 		public abstract bool DoesFolderExistInManifest(string path);
-		public abstract bool DoesFileExistInManifest(ManifestFileInfo fileInfo);
+		public abstract bool DoesFileExistInManifest(ManifestFileInfo fileInfo, bool requireExactFile);
 
 		public abstract IEnumerable<string> EnumerateFolders();
 		public abstract IEnumerable<ManifestFileInfo> EnumerateFiles();

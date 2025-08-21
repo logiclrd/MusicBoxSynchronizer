@@ -95,7 +95,7 @@ namespace MusicBoxSynchronizer
 				(_manifest!.GetFolderPath(fileID) != null);
 		}
 
-		public override bool DoesFileExist(ManifestFileInfo fileInfo)
+		public override bool DoesFileExist(ManifestFileInfo fileInfo, bool requireExactFile)
 		{
 			EnsureInitialized();
 
@@ -104,23 +104,29 @@ namespace MusicBoxSynchronizer
 			if (!File.Exists(fullPath))
 				return false;
 
+			if (!requireExactFile)
+				return true;
+
 			if (new FileInfo(fullPath).Length != fileInfo.FileSize)
 				return false;
 
-			return DoesFileExistInManifest(fileInfo);
+			return DoesFileExistInManifest(fileInfo, true);
 		}
 
-		public override bool DoesFileExistInManifest(ManifestFileInfo fileInfo)
+		public override bool DoesFileExistInManifest(ManifestFileInfo fileInfo, bool requireExactFile)
 		{
 			var localManifestFileInfo = _manifest!.GetFileInfo(fileInfo.FilePath);
 
 			if (localManifestFileInfo == null)
 				return false;
 
-			if (localManifestFileInfo.FileSize != fileInfo.FileSize)
-				return false;
-			if (localManifestFileInfo.MD5Checksum != fileInfo.MD5Checksum)
-				return false;
+			if (requireExactFile)
+			{
+				if (localManifestFileInfo.FileSize != fileInfo.FileSize)
+					return false;
+				if (localManifestFileInfo.MD5Checksum != fileInfo.MD5Checksum)
+					return false;
+			}
 
 			return true;
 		}

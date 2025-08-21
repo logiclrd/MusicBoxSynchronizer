@@ -128,7 +128,7 @@ namespace MusicBoxSynchronizer
 				(_manifest!.GetFolderPath(fileID) != null);
 		}
 
-		public override bool DoesFileExist(ManifestFileInfo fileInfo)
+		public override bool DoesFileExist(ManifestFileInfo fileInfo, bool requireExactFile)
 		{
 			EnsureInitialized();
 
@@ -137,6 +137,9 @@ namespace MusicBoxSynchronizer
 
 			if (!(_manifest.GetFileInfo(fileID) is ManifestFileInfo existingFileInfo))
 				return false;
+
+			if (!requireExactFile)
+				return (existingFileInfo.FilePath == fileInfo.FilePath);
 
 			return
 				(existingFileInfo.FilePath == fileInfo.FilePath) &&
@@ -149,9 +152,9 @@ namespace MusicBoxSynchronizer
 			return DoesFolderExist(path);
 		}
 
-		public override bool DoesFileExistInManifest(ManifestFileInfo fileInfo)
+		public override bool DoesFileExistInManifest(ManifestFileInfo fileInfo, bool requireExactFile)
 		{
-			return DoesFileExist(fileInfo);
+			return DoesFileExist(fileInfo, requireExactFile);
 		}
 
 		public override IEnumerable<string> EnumerateFolders()
@@ -187,6 +190,7 @@ namespace MusicBoxSynchronizer
 			var newFolder = new Google.Apis.Drive.v3.Data.File();
 
 			newFolder.Name = PathUtility.GetFileName(path);
+			newFolder.MimeType = Constants.GoogleDriveFolderMIMEType;
 
 			if (PathUtility.GetParentPath(path) is string containerPath)
 			{

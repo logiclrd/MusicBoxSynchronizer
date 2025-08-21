@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -59,18 +58,41 @@ namespace MusicBoxSynchronizer
 
 			OnDiagnosticOutput("=> Checking for remote files that don't exist locally");
 
+			bool removingFiles = false;
+
 			foreach (var fileInfo in _googleDriveRepository.EnumerateFiles())
 			{
-				if (!_localFileSystemRepository.DoesFileExistInManifest(fileInfo))
+				if (!_localFileSystemRepository.DoesFileExistInManifest(fileInfo, false))
 				{
-					OnDiagnosticOutput("   * REMOVE: " + fileInfo.FilePath);
+					if (fileInfo.FilePath.StartsWith("My Drive/MusicBox/"))
+					{
+						OnDiagnosticOutput("   * MUSICBOX (always sync downstream): " + fileInfo.FilePath);
 
-					QueueChangeForProcessing(
-						new ChangeInfo(
-							sourceRepository: _localFileSystemRepository,
-							changeType: ChangeType.Removed,
-							filePath: fileInfo.FilePath));
+						QueueChangeForProcessing(
+							new ChangeInfo(
+								sourceRepository: _googleDriveRepository,
+								changeType: ChangeType.Created,
+								filePath: fileInfo.FilePath));
+					}
+					else
+					{
+						OnDiagnosticOutput("   * REMOVE: " + fileInfo.FilePath);
+
+						QueueChangeForProcessing(
+							new ChangeInfo(
+								sourceRepository: _localFileSystemRepository,
+								changeType: ChangeType.Removed,
+								filePath: fileInfo.FilePath));
+
+						removingFiles = true;
+					}
 				}
+			}
+
+			if (removingFiles)
+			{
+				OnDiagnosticOutput("=> Waiting for queued file removals to complete");
+				WaitForChangeProcessorIdle();
 			}
 
 			OnDiagnosticOutput("=> Checking for remote folders that don't exist locally");
@@ -79,6 +101,9 @@ namespace MusicBoxSynchronizer
 			{
 				if (!_localFileSystemRepository.DoesFolderExistInManifest(folderPath))
 				{
+					if (folderPath.StartsWith("My Drive/MusicBox/"))
+						continue;
+
 					OnDiagnosticOutput("   * REMOVE: " + folderPath);
 
 					QueueChangeForProcessing(
@@ -92,34 +117,102 @@ namespace MusicBoxSynchronizer
 
 			OnDiagnosticOutput("=> Checking for local folders that don't exist remotely");
 
+			bool creatingFolders = false;
+
 			foreach (var folderPath in _localFileSystemRepository.EnumerateFolders())
 			{
 				if (!_googleDriveRepository.DoesFolderExistInManifest(folderPath))
 				{
-					OnDiagnosticOutput("   * CREATE: " + folderPath);
+					_googleDriveRepository.DoesFolderExistInManifest(folderPath);
 
-					QueueChangeForProcessing(
-						new ChangeInfo(
-							sourceRepository: _localFileSystemRepository,
-							changeType: ChangeType.Created,
-							isFolder: true,
-							filePath: folderPath));
+					if (folderPath.StartsWith("My Drive/MusicBox/"))
+					{
+						// local exists, remote doesn't (pick remote)
+						OnDiagnosticOutput("   * MUSICBOX (always sync downstream): " + folderPath);
+
+						QueueChangeForProcessing(
+							new ChangeInfo(
+								sourceRepository: _googleDriveRepository,
+								changeType: ChangeType.Removed,
+								isFolder: true,
+								filePath: folderPath));
+					}
+					else
+					{
+						OnDiagnosticOutput("   * CREATE: " + folderPath);
+
+						QueueChangeForProcessing(
+							new ChangeInfo(
+								sourceRepository: _localFileSystemRepository,
+								changeType: ChangeType.Created,
+								isFolder: true,
+								filePath: folderPath));
+
+						creatingFolders = true;
+					}
 				}
+			}
+
+			if (creatingFolders)
+			{
+				OnDiagnosticOutput("=> Waiting for queued direction creations to complete");
+				WaitForChangeProcessorIdle();
 			}
 
 			OnDiagnosticOutput("=> Checking for local files that don't exist remotely");
 
 			foreach (var fileInfo in _localFileSystemRepository.EnumerateFiles())
 			{
-				if (!_googleDriveRepository.DoesFileExistInManifest(fileInfo))
+				if (!_googleDriveRepository.DoesFileExistInManifest(fileInfo, true))
 				{
-					OnDiagnosticOutput("   * CREATE: " + fileInfo.FilePath);
+					if (!_googleDriveRepository.DoesFileExistInManifest(fileInfo, false))
+					{
+						if (fileInfo.FilePath.StartsWith("My Drive/MusicBox/"))
+						{
+							// local exist, remote doesn't (pick remote)
+							OnDiagnosticOutput("   * MUSICBOX (always sync downstream): " + fileInfo.FilePath);
 
-					QueueChangeForProcessing(
-						new ChangeInfo(
-							sourceRepository: _localFileSystemRepository,
-							changeType: ChangeType.Created,
-							filePath: fileInfo.FilePath));
+							QueueChangeForProcessing(
+								new ChangeInfo(
+									sourceRepository: _googleDriveRepository,
+									changeType: ChangeType.Removed,
+									filePath: fileInfo.FilePath));
+						}
+						else
+						{
+							OnDiagnosticOutput("   * MODIFY: " + fileInfo.FilePath);
+
+							QueueChangeForProcessing(
+								new ChangeInfo(
+									sourceRepository: _localFileSystemRepository,
+									changeType: ChangeType.Modified,
+									filePath: fileInfo.FilePath));
+						}
+					}
+					else
+					{
+						if (fileInfo.FilePath.StartsWith("My Drive/MusicBox/"))
+						{
+							// local and remote both exist, remote is different (pick remote)
+							OnDiagnosticOutput("   * MUSICBOX (always sync downstream): " + fileInfo.FilePath);
+
+							QueueChangeForProcessing(
+								new ChangeInfo(
+									sourceRepository: _googleDriveRepository,
+									changeType: ChangeType.Modified,
+									filePath: fileInfo.FilePath));
+						}
+						else
+						{
+							OnDiagnosticOutput("   * CREATE: " + fileInfo.FilePath);
+
+							QueueChangeForProcessing(
+								new ChangeInfo(
+									sourceRepository: _localFileSystemRepository,
+									changeType: ChangeType.Created,
+									filePath: fileInfo.FilePath));
+						}
+					}
 				}
 			}
 		}
@@ -320,18 +413,11 @@ namespace MusicBoxSynchronizer
 
 		void WaitForChangeProcessorIdle()
 		{
-			Console.WriteLine("WAIT: obtain lock");
 			lock (_sync)
 			{
-				Console.WriteLine("WAIT: lock obtained, entering loop");
 				while (_changeProcessorBusy || _changeProcessorQueue.Any())
-				{
-					Console.WriteLine("busy? {0}  queue: {1}", _changeProcessorBusy, _changeProcessorQueue.Count);
 					Monitor.Wait(_sync);
-				}
-				Console.WriteLine("WAIT: after loop");
 			}
-			Console.WriteLine("WAIT: finished");
 		}
 
 		void WaitForChangeProcessorToExit()
