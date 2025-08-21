@@ -1,6 +1,8 @@
 using System;
+using System.Data;
 using System.IO;
 using System.Linq;
+using System.Text;
 
 using File = Google.Apis.Drive.v3.Data.File;
 
@@ -11,12 +13,34 @@ namespace MusicBoxSynchronizer
 		public string FilePath;
 		public long FileSize;
 		public DateTime ModifiedTimeUTC;
-		public string MD5Checksum;
 
-		public ManifestFileInfo(string filePath, string md5Checksum)
+		public string MD5Checksum
+		{
+			get
+			{
+				if (_md5Checksum == null)
+				{
+					if (_md5ChecksumSourceLocalFilePath == null)
+						throw new Exception("Internal error: Lazy load MD5 checksum field does not have a source local file path");
+
+					_md5Checksum = MD5Utility.ComputeChecksum(_md5ChecksumSourceLocalFilePath);
+				}
+
+				return _md5Checksum;
+			}
+		}
+
+		string? _md5Checksum;
+		string? _md5ChecksumSourceLocalFilePath;
+
+		public ManifestFileInfo(string filePath, string md5ChecksumOrFilePathForLazyLoad)
 		{
 			FilePath = filePath;
-			MD5Checksum = md5Checksum;
+
+			if (System.IO.File.Exists(md5ChecksumOrFilePathForLazyLoad))
+				_md5ChecksumSourceLocalFilePath = md5ChecksumOrFilePathForLazyLoad;
+			else
+				_md5Checksum = md5ChecksumOrFilePathForLazyLoad;
 		}
 
 		public static ManifestFileInfo LoadFrom(TextReader reader)
@@ -64,10 +88,16 @@ namespace MusicBoxSynchronizer
 				};
 		}
 
-		public ChangeInfo CompareTo(ManifestFileInfo oldFileInfo, MonitorableRepository sourceRepository)
+		public ChangeInfo? CompareTo(ManifestFileInfo oldFileInfo, MonitorableRepository sourceRepository)
 		{
+			Console.WriteLine("DOIN A COMPARE TWO");
+			Console.WriteLine("on the left: " + this.FilePath);
+			Console.WriteLine("on the right: " + oldFileInfo.FilePath);
+
 			bool renamed = this.FilePath != oldFileInfo.FilePath;
 			bool modified = (this.FileSize != oldFileInfo.FileSize) || (this.MD5Checksum != oldFileInfo.MD5Checksum);
+
+			Console.WriteLine("renamed {0}, modified {1}", renamed, modified);
 
 			if (modified && !renamed)
 			{
@@ -94,7 +124,7 @@ namespace MusicBoxSynchronizer
 					md5Checksum: this.MD5Checksum,
 					oldMD5Checksum: this.MD5Checksum);
 			}
-			else
+			else if (renamed && modified)
 			{
 				return new ChangeInfo(
 					sourceRepository: sourceRepository,
@@ -104,6 +134,8 @@ namespace MusicBoxSynchronizer
 					md5Checksum: this.MD5Checksum,
 					oldMD5Checksum: oldFileInfo.MD5Checksum);
 			}
+
+			return null;
 		}
 
 		public ChangeInfo GenerateCreationChangeInfo(MonitorableRepository sourceRepository)

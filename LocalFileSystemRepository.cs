@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Threading;
 
 namespace MusicBoxSynchronizer
@@ -17,7 +19,6 @@ namespace MusicBoxSynchronizer
 		string _rootPath;
 		Manifest? _manifest;
 		FileSystemWatcher? _watcher;
-		Dictionary<string, DateTime> _lastSelfChangeToPath = new Dictionary<string, DateTime>();
 
 		public LocalFileSystemRepository()
 			: this(DefaultRepositoryPath)
@@ -54,38 +55,11 @@ namespace MusicBoxSynchronizer
 
 			_watcher.IncludeSubdirectories = true;
 
-			Manifest? TryLoadManifest()
-			{
-				if (File.Exists(ManifestStateFileName))
-				{
-					try
-					{
-						OnDiagnosticOutput("Loading existing manifest...");
-						return Manifest.LoadFrom(ManifestStateFileName);
-					}
-					catch (Exception e)
-					{
-						OnDiagnosticOutput("Failed to load existing manifest: " + e);
-					}
-				}
+			OnDiagnosticOutput("Building manifest...");
 
-				return null;
-			}
+			_manifest = Manifest.Build(_rootPath!);
 
-			Manifest BuildManifest()
-			{
-				OnDiagnosticOutput("Building manifest...");
-
-				var manifest = Manifest.Build(_rootPath!);
-
-				manifest.HasChanges = true;
-
-				return manifest;
-			}
-
-			_manifest = TryLoadManifest() ?? BuildManifest();
-
-			SaveManifest();
+			_manifest.HasChanges = true;
 		}
 
 		public string RootPath => _rootPath;
@@ -104,7 +78,7 @@ namespace MusicBoxSynchronizer
 			path = path.TrimStart(DirectorySeparatorChars);
 
 			if (Path.IsPathRooted(path))
-				throw new Exception("Path may not be rooted");
+				throw new Exception("Path may not be rooted, received: " + path);
 
 			return Path.Combine(_rootPath, path);
 		}
@@ -112,6 +86,13 @@ namespace MusicBoxSynchronizer
 		public override bool DoesFolderExist(string path)
 		{
 			return Directory.Exists(GetFullPath(path));
+		}
+
+		public override bool DoesFolderExistInManifest(string path)
+		{
+			return
+				(_manifest!.GetFileID(path) is string fileID) &&
+				(_manifest!.GetFolderPath(fileID) != null);
 		}
 
 		public override bool DoesFileExist(ManifestFileInfo fileInfo)
@@ -126,6 +107,11 @@ namespace MusicBoxSynchronizer
 			if (new FileInfo(fullPath).Length != fileInfo.FileSize)
 				return false;
 
+			return DoesFileExistInManifest(fileInfo);
+		}
+
+		public override bool DoesFileExistInManifest(ManifestFileInfo fileInfo)
+		{
 			var localManifestFileInfo = _manifest!.GetFileInfo(fileInfo.FilePath);
 
 			if (localManifestFileInfo == null)
@@ -162,8 +148,8 @@ namespace MusicBoxSynchronizer
 				string relativePath = fileInfo.FilePath.Substring(oldPath.Length);
 				string newSubpath = newPath + relativePath;
 
-				_lastSelfChangeToPath[fileInfo.FilePath] = DateTime.UtcNow;
-				_lastSelfChangeToPath[newSubpath] = DateTime.UtcNow;
+				RegisterSelfChange(fileInfo.FilePath);
+				RegisterSelfChange(newSubpath);
 
 				_manifest.RegisterChange(
 					new ChangeInfo(this, ChangeType.Moved, newSubpath, fileInfo.FilePath, isFolder: false, fileInfo.MD5Checksum),
@@ -184,7 +170,7 @@ namespace MusicBoxSynchronizer
 
 			foreach (var fileInfo in contentItems)
 			{
-				_lastSelfChangeToPath[fileInfo.FilePath] = DateTime.UtcNow;
+				RegisterSelfChange(fileInfo.FilePath);
 				_manifest.RegisterChange(
 					new ChangeInfo(this, ChangeType.Removed, fileInfo.FilePath, isFolder: false),
 					fileSize: fileInfo.FileSize,
@@ -198,7 +184,32 @@ namespace MusicBoxSynchronizer
 		{
 			OnDiagnosticOutput("Creating or updating file: " + path);
 
-			_lastSelfChangeToPath[path] = DateTime.UtcNow;
+			RegisterSelfChange(path);
+
+			string fullPath = GetFullPath(path);
+
+			string directoryFullPath = Path.GetDirectoryName(fullPath)!;
+
+			if (!Directory.Exists(directoryFullPath))
+			{
+				void EnsureDirectoryExists(string directoryPrefixPath)
+				{
+					string? parent = Path.GetDirectoryName(directoryPrefixPath);
+
+					if (parent != null)
+						EnsureDirectoryExists(parent);
+
+					string fullPath = GetFullPath(directoryPrefixPath);
+
+					if (!Directory.Exists(fullPath))
+					{
+						Directory.CreateDirectory(fullPath);
+						_manifest!.PopulateFolder(directoryPrefixPath, directoryPrefixPath);
+					}
+				}
+
+				EnsureDirectoryExists(path);
+			}
 
 			using (var fileStream = File.Open(GetFullPath(path), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite))
 			{
@@ -227,8 +238,8 @@ namespace MusicBoxSynchronizer
 			if (!oldExists && !newExists)
 				throw new Exception("Received file move/rename event but the file does not seem to exist: " + newPath + " (<- " + oldPath + ")");
 
-			_lastSelfChangeToPath[oldPath] = DateTime.UtcNow;
-			_lastSelfChangeToPath[newPath] = DateTime.UtcNow;
+			RegisterSelfChange(oldPath);
+			RegisterSelfChange(newPath);
 
 			File.Move(
 				GetFullPath(oldPath),
@@ -248,14 +259,22 @@ namespace MusicBoxSynchronizer
 		{
 			OnDiagnosticOutput("Removing file: " + path);
 
-			_lastSelfChangeToPath[path] = DateTime.UtcNow;
+			RegisterSelfChange(path);
 
-			File.Delete(GetFullPath(path));
+			string fullPath = GetFullPath(path);
+
+			OnDiagnosticOutput("=> Physical delete: " + fullPath);
+
+			File.Delete(fullPath);
+
+			OnDiagnosticOutput("=> Register change with manifest");
 
 			_manifest!.RegisterChange(
 				new ChangeInfo(this, ChangeType.Removed, path, isFolder: false),
 				fileSize: -1,
 				modifiedTimeUTC: default);
+
+			OnDiagnosticOutput("done");
 		}
 
 		public override Stream GetFileContentStream(string path)
@@ -281,12 +300,6 @@ namespace MusicBoxSynchronizer
 			EnsureInitialized();
 
 			_manifest!.PopulateFile(fileInfo, fileInfo.FilePath);
-		}
-
-		public override void SaveManifest()
-		{
-			if (_manifest?.HasChanges ?? false)
-				_manifest.SaveTo(ManifestStateFileName);
 		}
 
 		public override void StartMonitor()
@@ -340,8 +353,6 @@ namespace MusicBoxSynchronizer
 		{
 			base.OnChangeDetected(change);
 
-OnDiagnosticOutput("Processing change to local file: " + change.ChangeType + " " + change.FilePath);
-
 			string fullPath = GetFullPath(change.FilePath);
 
 			long fileSize = -1;
@@ -355,14 +366,10 @@ OnDiagnosticOutput("Processing change to local file: " + change.ChangeType + " "
 				modifiedTimeUTC = fileInfo.LastWriteTimeUtc;
 			}
 
-OnDiagnosticOutput("Registering change with the local files manifest");
-
 			_manifest!.RegisterChange(
 				change,
 				fileSize,
 				modifiedTimeUTC);
-
-			SaveManifest();
 		}
 
 		void QueueChangedEvent(ChangeType changeType, string fullPath, string? oldFullPath = null)
@@ -420,28 +427,38 @@ OnDiagnosticOutput("Registering change with the local files manifest");
 
 		void QueuePumpThreadProc()
 		{
-			while (!_stopping)
+			try
 			{
-				lock (_sync)
+				while (!_stopping)
 				{
-					var now = DateTime.UtcNow;
-
-					if (_changedEventQueue.Count > 0)
+					lock (_sync)
 					{
-						var nextEvent = _changedEventQueue.First();
+						var now = DateTime.UtcNow;
 
-						if (nextEvent.DueTimeUTC < now)
-							PumpNextEvent();
-						else
+						if (_changedEventQueue.Count > 0)
 						{
-							var timeout = nextEvent.DueTimeUTC - now;
+							var nextEvent = _changedEventQueue.First();
 
-							Monitor.Wait(_sync, timeout);
+							if (nextEvent.DueTimeUTC < now)
+								PumpNextEvent();
+							else
+							{
+								var timeout = nextEvent.DueTimeUTC - now;
+
+								Monitor.Wait(_sync, timeout);
+							}
 						}
+						else
+							Monitor.Wait(_sync);
 					}
-					else
-						Monitor.Wait(_sync);
 				}
+			}
+			catch (Exception e)
+			{
+				OnDiagnosticOutput("QueuePump threadproc failed: " + e);
+				Thread.Sleep(TimeSpan.FromSeconds(2));
+				OnDiagnosticOutput("Restarting QueuePump thread");
+				StartQueuePumpThreadProc();
 			}
 		}
 
@@ -451,6 +468,9 @@ OnDiagnosticOutput("Registering change with the local files manifest");
 
 			_changedEventQueue.RemoveAt(0);
 
+			// Filter out future events that see a change to the same file, as they will
+			// be redundant; the file will be processed in its present state, not in the
+			// state it was in when the events were queued.
 			if ((nextEvent.ChangeType == ChangeType.Created) || (nextEvent.ChangeType == ChangeType.Modified))
 			{
 				for (int i = 0; i < _changedEventQueue.Count; i++)
@@ -470,8 +490,105 @@ OnDiagnosticOutput("Registering change with the local files manifest");
 				}
 			}
 
+			// Turn Create+Remove back into MoveFile.
+			if ((nextEvent.ChangeType == ChangeType.Created) || (nextEvent.ChangeType == ChangeType.Removed))
+			{
+				var otherEventType = (nextEvent.ChangeType == ChangeType.Created) ? ChangeType.Removed : ChangeType.Created;
+
+				Console.WriteLine("TRYING TO ANNEAL A MOVE, LOOKING AT: " + nextEvent.ChangeType);
+				Console.WriteLine("searching for: " + otherEventType);
+				Console.WriteLine("there are {0} additional queue events", _changedEventQueue.Count);
+
+				for (int i = 0; i < _changedEventQueue.Count; i++)
+				{
+					var laterEvent = _changedEventQueue[i];
+
+					Console.WriteLine("later event {0}: {1}", i, laterEvent.FullPath);
+
+					if (laterEvent.FullPath == nextEvent.FullPath)
+						break;
+
+					if (Path.GetFileName(laterEvent.FullPath) == Path.GetFileName(nextEvent.FullPath))
+					{
+						Console.WriteLine("it's a candidate, checking the details");
+
+						var removedEvent = (nextEvent.ChangeType == ChangeType.Removed) ? nextEvent : laterEvent;
+						var createdEvent = (nextEvent.ChangeType == ChangeType.Created) ? nextEvent : laterEvent;
+
+						string? removedRelativePath = PathUtility.GetRelativePath(_rootPath, removedEvent.FullPath);
+						string? createdRelativePath = PathUtility.GetRelativePath(_rootPath, createdEvent.FullPath);
+
+						if ((removedRelativePath == null) || (createdRelativePath == null))
+						{
+							Console.WriteLine("at least one path did not map ({0} / {1})", removedRelativePath, createdRelativePath);
+							continue;
+						}
+
+						Console.WriteLine("=> removed: {0}", removedRelativePath);
+						Console.WriteLine("=> created: {0}", createdRelativePath);
+
+						var details = _manifest!.GetFileInfo(removedRelativePath);
+
+						Console.WriteLine("from manifest, details on the removed path: {0}", details);
+
+						if (details != null)
+						{
+							string oldFullPath = GetFullPath(removedRelativePath);
+							string newFullPath = GetFullPath(createdRelativePath);
+
+							Console.WriteLine("old full path: {0}", oldFullPath);
+							Console.WriteLine("new full path: {0}", newFullPath);
+							Console.WriteLine("new full path exists: {0}", File.Exists(newFullPath));
+
+							if (File.Exists(newFullPath))
+							{
+								var info = new FileInfo(newFullPath);
+
+								Console.WriteLine("retrieved info on the new path from the filesystem");
+
+								if ((info.Length == details.FileSize)
+								 && (info.LastWriteTimeUtc == details.ModifiedTimeUTC))
+									Console.WriteLine("matches length and last write time");
+								else
+								{
+									Console.WriteLine("DOES NOT MATCH LENGTH OR LAST WRITE TIME");
+									Console.WriteLine("=> length: {0} vs {1}", info.Length, details.FileSize);
+									Console.WriteLine("=> date: {0:yyyy-MM-dd HH:mm:ss.fffffff} vs {1:yyyy-MM-dd HH:mm:ss.fffffff}", info.LastWriteTimeUtc, details.ModifiedTimeUTC);
+								}
+
+								if ((info.Length == details.FileSize)
+								 && (info.LastWriteTimeUtc == details.ModifiedTimeUTC))
+								{
+									Console.WriteLine("computing checksum");
+
+									using (var fileStream = File.OpenRead(newFullPath))
+									{
+										string checksum = MD5Utility.ComputeChecksum(fileStream);
+
+										if (checksum != details.MD5Checksum)
+											Console.WriteLine("CHECKSUM DOES NOT MATCH");
+
+										if (checksum == details.MD5Checksum)
+										{
+											OnDiagnosticOutput("Coalescing Removed+Created into Move from '" + oldFullPath + "' to '" + newFullPath + "'");
+											_changedEventQueue.RemoveAt(i);
+											nextEvent.ChangeType = ChangeType.Moved;
+											nextEvent.OldFullPath = oldFullPath;
+											nextEvent.FullPath = newFullPath;
+											break;
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+
 			RaiseChangedEvent(nextEvent);
 		}
+
+
 
 		void RaiseChangedEvent(QueueEntry queueEntry)
 		{

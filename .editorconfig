@@ -1,3 +1,4 @@
 [*.cs]
 indent_style = tab
 indent_size = 2
+csharp_indent_case_contents_when_block = false

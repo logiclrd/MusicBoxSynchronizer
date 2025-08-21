@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.IO;
 using System.IO.Enumeration;
 using System.Linq;
@@ -36,17 +37,19 @@ namespace MusicBoxSynchronizer
 					continue;
 
 				if (entry is DirectoryInfo)
+				{
 					ret._folders[relativePath] = relativePath;
+					ret._idByPath[relativePath] = relativePath;
+				}
 				else if (entry is FileInfo fileEntry)
 				{
-					string md5Checksum = MD5Utility.ComputeChecksum(entry.FullName);
-
-					var fileInfo = new ManifestFileInfo(relativePath, md5Checksum);
+					var fileInfo = new ManifestFileInfo(relativePath, entry.FullName);
 
 					fileInfo.FileSize = fileEntry.Length;
 					fileInfo.ModifiedTimeUTC = fileEntry.LastWriteTimeUtc;
 
 					ret._files[relativePath] = fileInfo;
+					ret._idByPath[relativePath] = relativePath;
 				}
 			}
 
@@ -116,7 +119,7 @@ namespace MusicBoxSynchronizer
 
 					if (folderFile.Parents?.Any() ?? false)
 						container = BuildPath(folderFile.Parents.Single()) + "/";
-					
+
 					return container + folderFile.Name;
 				}
 
@@ -127,7 +130,7 @@ namespace MusicBoxSynchronizer
 			{
 				string path = BuildPath(folderFile.Id);
 
-				ret._folders[folderFile.Id] = BuildPath(folderFile.Id);
+				ret._folders[folderFile.Id] = path;
 				ret._idByPath[path] = folderFile.Id;
 			}
 
@@ -164,7 +167,7 @@ namespace MusicBoxSynchronizer
 					break;
 			}
 
-			for (int i=0; i < shortcutTargets.Count; i++)
+			for (int i = 0; i < shortcutTargets.Count; i++)
 			{
 				var shortcutTarget = shortcutTargets[i];
 
@@ -246,7 +249,7 @@ namespace MusicBoxSynchronizer
 
 			if (int.TryParse(folderCountString, out var folderCount))
 			{
-				for (int i=0; i < folderCount; i++)
+				for (int i = 0; i < folderCount; i++)
 				{
 					string id = reader.ReadLine() ?? throw new Exception("Unexpected EOF");
 					string path = reader.ReadLine() ?? throw new Exception("Unexpected EOF");
@@ -260,7 +263,7 @@ namespace MusicBoxSynchronizer
 
 			if (int.TryParse(fileCountString, out var fileCount))
 			{
-				for (int i=0; i < fileCount; i++)
+				for (int i = 0; i < fileCount; i++)
 				{
 					string id = reader.ReadLine() ?? throw new Exception("Unexpected EOF");
 					var file = ManifestFileInfo.LoadFrom(reader);
@@ -397,7 +400,7 @@ namespace MusicBoxSynchronizer
 				? RegisterRemoval(change.FileId, sourceRepository)
 				: RegisterChange(change.File!, sourceRepository);
 
-		public ChangeInfo RegisterChange(File file, MonitorableRepository sourceRepository)
+		public ChangeInfo? RegisterChange(File file, MonitorableRepository sourceRepository)
 			=> RegisterChange(ManifestFileInfo.Build(file, this), file.Id, file.Name, file.MimeType, file.Parents?.SingleOrDefault(), sourceRepository);
 
 		ChangeInfo? RegisterRemoval(string fileID, MonitorableRepository sourceRepository)
@@ -431,27 +434,45 @@ namespace MusicBoxSynchronizer
 			return null;
 		}
 
-		public ChangeInfo RegisterChange(ManifestFileInfo newFileInfo, string fileID, string fileName, string fileMIMEType, string? fileParentFileID, MonitorableRepository sourceRepository)
+		public ChangeInfo? RegisterChange(ManifestFileInfo newFileInfo, string fileID, string fileName, string fileMIMEType, string? fileParentFileID, MonitorableRepository sourceRepository)
 		{
+			Console.WriteLine("RegisterChange:");
+			Console.WriteLine("- newFileInfo: ManifestFileInfo {{ {0} }}", newFileInfo.FilePath);
+			Console.WriteLine("- fileID: {0}", fileID);
+			Console.WriteLine("- fileName: {0}", fileName);
+			Console.WriteLine("- fileParentID: {0}", fileParentFileID ?? "<null>");
+
 			string container = "";
 
 			if (fileParentFileID != null)
 			{
 				_folders.TryGetValue(fileParentFileID, out var containerPath);
 
+				Console.WriteLine("=> container path: {0}", containerPath ?? "<null>");
+
 				if (containerPath != null)
 					container = containerPath + "/";
+
+				Console.WriteLine("=> container: {0}", container);
 			}
+
+			string? oldItemPath = GetFileInfo(fileID)?.FilePath;
 
 			string newItemPath = container + fileName;
 
+			Console.WriteLine("=> old item path: {0}", oldItemPath ?? "<null>");
+			Console.WriteLine("=> new item path: {0}", newItemPath);
+
 			if (fileMIMEType == Constants.GoogleDriveFolderMIMEType)
 			{
+				bool fileIDExists = _folders.TryGetValue(fileID, out var oldFolderPath);
+
+				if (oldFolderPath == newItemPath)
+					return null;
+
 				try
 				{
-					bool fileIDExists = _folders.TryGetValue(fileID, out var oldFolderPath);
-
-					if (fileIDExists && (oldFolderPath != newItemPath))
+					if (fileIDExists)
 					{
 						return new ChangeInfo(
 							sourceRepository: sourceRepository,
@@ -472,23 +493,38 @@ namespace MusicBoxSynchronizer
 				finally
 				{
 					_folders[fileID] = newItemPath;
+					if (oldItemPath != null)
+						_idByPath.Remove(oldItemPath);
 					_idByPath[newItemPath] = fileID;
 					_hasChanges = true;
 				}
 			}
 			else
 			{
+				string? oldFilePath = null;
+
 				try
 				{
 					if (_files.TryGetValue(fileID, out var oldFileInfo))
+					{
+						oldFilePath = oldFileInfo.FilePath;
+						Console.WriteLine("=> got old file info, found path: {0}", oldFilePath);
+						Console.WriteLine("=> comparing FileInfo objects");
 						return newFileInfo.CompareTo(oldFileInfo, sourceRepository);
+					}
 					else
 						return newFileInfo.GenerateCreationChangeInfo(sourceRepository);
 				}
 				finally
 				{
+					Console.WriteLine("=> stashing new file info");
 					_files[fileID] = newFileInfo;
+					Console.WriteLine("=> unlinking old path");
+					if (oldFilePath != null)
+						_idByPath.Remove(oldFilePath);
+					Console.WriteLine("=> linking new path {0} to file ID {1}", newFileInfo.FilePath, fileID);
 					_idByPath[newFileInfo.FilePath] = fileID;
+					Console.WriteLine("=> setting dirty flag");
 					_hasChanges = true;
 				}
 			}
@@ -496,12 +532,18 @@ namespace MusicBoxSynchronizer
 
 		public ChangeInfo RegisterChange(ChangeInfo changeInfo, long fileSize, DateTime modifiedTimeUTC)
 		{
+			Console.WriteLine("RegisterChange: " + changeInfo);
+
 			if (_idByPath.TryGetValue(changeInfo.FilePath, out var fileID))
 			{
+				Console.WriteLine("=> got file ID: " + fileID);
+
 				if (changeInfo.ChangeType == ChangeType.Removed)
 					RegisterRemoval(fileID, changeInfo.SourceRepository);
 				else
 				{
+					Console.WriteLine("=> building newFileInfo");
+
 					var newFileInfo = new ManifestFileInfo(changeInfo.FilePath, changeInfo.MD5Checksum);
 
 					newFileInfo.FileSize = fileSize;
@@ -513,8 +555,47 @@ namespace MusicBoxSynchronizer
 					RegisterChange(newFileInfo, fileID, fileName, "application/octet-stream", GetFileID(containerPath), changeInfo.SourceRepository);
 				}
 			}
+			else if (((changeInfo.ChangeType == ChangeType.Moved) || (changeInfo.ChangeType == ChangeType.MovedAndModified))
+			      && (changeInfo.OldFilePath != null)
+			      && _idByPath.TryGetValue(changeInfo.OldFilePath, out fileID))
+			{
+				var fileInfo = GetFileInfo(fileID);
+
+				if (fileInfo == null)
+					throw new Exception("Internal error: Couldn't find FileInfo for " + fileID + " (from path " + changeInfo.OldFilePath + ")");
+
+				fileInfo.FilePath = changeInfo.FilePath;
+
+				_idByPath.Remove(changeInfo.OldFilePath);
+				_idByPath[changeInfo.FilePath] = fileID;
+			}
 
 			return changeInfo;
+		}
+
+		public void RegisterMove(string fromPath, string toPath, MonitorableRepository sourceRepository)
+		{
+			Console.WriteLine("REGISTERING THAT {0} SHOULD BE AT {1}", fromPath, toPath);
+
+			if (_idByPath.TryGetValue(toPath, out var existingToPathFileID))
+				throw new Exception("Can't register a move from " + fromPath + " to " + toPath + " because the 'to' path is already mapped to file ID " + existingToPathFileID);
+
+			string? fileID = GetFileID(fromPath);
+
+			if (fileID != null)
+			{
+				Console.WriteLine("=> have file ID");
+
+				if (GetFileInfo(fileID) is ManifestFileInfo fileInfo)
+				{
+					Console.WriteLine("=> have file info");
+
+					RegisterChange(
+						new ChangeInfo(sourceRepository, ChangeType.Moved, toPath, fromPath, isFolder: false, fileInfo.MD5Checksum),
+						fileSize: fileInfo.FileSize,
+						modifiedTimeUTC: fileInfo.ModifiedTimeUTC);
+				}
+			}
 		}
 	}
 }

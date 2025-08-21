@@ -26,7 +26,6 @@ namespace MusicBoxSynchronizer
 
 			var service = new Service();
 
-
 			string runModeArgument = (args.Length > 0) ? args[0] : "/?";
 
 			switch (runModeArgument)

@@ -1,12 +1,16 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
+using System.Net.Http;
 using System.Threading;
 
 using Google.Apis.Auth.OAuth2;
 using Google.Apis.Drive.v3;
 using Google.Apis.Services;
 using Google.Apis.Util.Store;
+
+using ChangeList = Google.Apis.Drive.v3.Data.ChangeList;
 
 namespace MusicBoxSynchronizer
 {
@@ -16,7 +20,8 @@ namespace MusicBoxSynchronizer
 
 		DriveService? _driveService;
 		Manifest? _manifest;
-		object _sync = new object();
+		object _threadSync = new object();
+		object _selfChangeSync = new object();
 		bool _stopping = false;
 
 		const string ManifestStateFileName = "google_drive_manifest";
@@ -34,7 +39,7 @@ namespace MusicBoxSynchronizer
 						OnDiagnosticOutput("Loading existing manifest...");
 						return Manifest.LoadFrom(ManifestStateFileName);
 					}
-					catch {}
+					catch { }
 				}
 
 				return null;
@@ -51,7 +56,21 @@ namespace MusicBoxSynchronizer
 				return manifest;
 			}
 
-			_manifest = TryLoadManifest() ?? BuildManifest();
+			_manifest = TryLoadManifest();
+
+			if (_manifest != null)
+			{
+				if (string.IsNullOrEmpty(_manifest.PageToken))
+				{
+					OnDiagnosticOutput("WARNING: Page token missing, grabbing a fresh start token");
+
+					var getStartPageTokenRequest = _driveService!.Changes.GetStartPageToken();
+
+					_manifest.PageToken = getStartPageTokenRequest.Execute().StartPageTokenValue;
+				}
+			}
+			else
+				_manifest = BuildManifest();
 
 			SaveManifest();
 		}
@@ -62,7 +81,7 @@ namespace MusicBoxSynchronizer
 				throw new InvalidOperationException("Repository is not initialized");
 		}
 
-		public override void SaveManifest()
+		public void SaveManifest()
 		{
 			if (_manifest?.HasChanges ?? false)
 				_manifest.SaveTo(ManifestStateFileName);
@@ -109,7 +128,6 @@ namespace MusicBoxSynchronizer
 				(_manifest!.GetFolderPath(fileID) != null);
 		}
 
-
 		public override bool DoesFileExist(ManifestFileInfo fileInfo)
 		{
 			EnsureInitialized();
@@ -124,6 +142,16 @@ namespace MusicBoxSynchronizer
 				(existingFileInfo.FilePath == fileInfo.FilePath) &&
 				(existingFileInfo.FileSize == fileInfo.FileSize) &&
 				(existingFileInfo.MD5Checksum == fileInfo.MD5Checksum);
+		}
+
+		public override bool DoesFolderExistInManifest(string path)
+		{
+			return DoesFolderExist(path);
+		}
+
+		public override bool DoesFileExistInManifest(ManifestFileInfo fileInfo)
+		{
+			return DoesFileExist(fileInfo);
 		}
 
 		public override IEnumerable<string> EnumerateFolders()
@@ -171,9 +199,19 @@ namespace MusicBoxSynchronizer
 
 			creationRequest.Fields = "id";
 
-			newFolder = creationRequest.Execute();
+			lock (_selfChangeSync)
+			{
+				newFolder = creationRequest.Execute();
 
-			return newFolder.Id;
+				RegisterSelfChange(path);
+
+				_manifest.RegisterChange(
+					new ChangeInfo(this, ChangeType.Created, path, isFolder: true),
+					fileSize: -1,
+					DateTime.MinValue);
+
+				return newFolder.Id;
+			}
 		}
 
 		public override void CreateOrUpdateFile(string filePath, Stream fileContent)
@@ -191,7 +229,21 @@ namespace MusicBoxSynchronizer
 
 				var createRequest = _driveService!.Files.Create(file, fileContent, "application/octet-stream");
 
-				createRequest.Upload();
+				lock (_selfChangeSync)
+				{
+					createRequest.Upload();
+
+					RegisterSelfChange(filePath);
+
+					fileContent.Position = 0;
+
+					string md5Checksum = MD5Utility.ComputeChecksum(fileContent);
+
+					_manifest.RegisterChange(
+						new ChangeInfo(this, ChangeType.Created, filePath, md5Checksum),
+						fileContent.Length,
+						DateTime.UtcNow);
+				}
 			}
 			else
 			{
@@ -204,7 +256,21 @@ namespace MusicBoxSynchronizer
 
 				var updateRequest = _driveService!.Files.Update(file, _manifest.GetFileID(filePath), fileContent, "application/octet-stream");
 
-				updateRequest.Upload();
+				lock (_selfChangeSync)
+				{
+					updateRequest.Upload();
+
+					RegisterSelfChange(filePath);
+
+					fileContent.Position = 0;
+
+					string md5Checksum = MD5Utility.ComputeChecksum(fileContent);
+
+					_manifest.RegisterChange(
+						new ChangeInfo(this, ChangeType.Modified, filePath, md5Checksum),
+						fileContent.Length,
+						DateTime.UtcNow);
+				}
 			}
 		}
 
@@ -220,7 +286,15 @@ namespace MusicBoxSynchronizer
 
 				file.Trashed = true;
 
-				_driveService!.Files.Update(file, fileID).Execute();
+				lock (_selfChangeSync)
+				{
+					_driveService!.Files.Update(file, fileID).Execute();
+
+					_manifest.RegisterChange(
+						new ChangeInfo(this, ChangeType.Removed, filePath),
+						fileSize: -1,
+						modifiedTimeUTC: default);
+				}
 			}
 		}
 
@@ -239,6 +313,11 @@ namespace MusicBoxSynchronizer
 			string oldParent = PathUtility.GetParentPath(oldPath) ?? "";
 			string newParent = PathUtility.GetParentPath(newPath) ?? "";
 
+			string? newParentFolderID = _manifest.GetFileID(newParent);
+
+			if (newParentFolderID == null)
+				OnDiagnosticOutput("Target folder does not seem to exist");
+
 			string oldName = PathUtility.GetFileName(oldPath);
 			string newName = PathUtility.GetFileName(newPath);
 
@@ -255,7 +334,23 @@ namespace MusicBoxSynchronizer
 				updateRequest.AddParents = _manifest.GetFileID(newParent);
 			}
 
-			updateRequest.Execute();
+			lock (_selfChangeSync)
+			{
+				Console.WriteLine("=> Executing request against Google API");
+
+				updateRequest.Execute();
+
+				Console.WriteLine("=> Registering self-change on paths");
+
+				RegisterSelfChange(oldName);
+				RegisterSelfChange(newName);
+
+				Console.WriteLine("=> Notifying the manifest");
+
+				_manifest.RegisterMove(oldPath, newPath, this);
+
+				Console.WriteLine("=> Done");
+			}
 		}
 
 		public override void MoveFolder(string oldPath, string newPath)
@@ -300,11 +395,18 @@ namespace MusicBoxSynchronizer
 
 		public override void StopMonitor()
 		{
-			lock (_sync)
+			lock (_threadSync)
 			{
 				_stopping = true;
-				Monitor.PulseAll(_sync);
+				Monitor.PulseAll(_threadSync);
 			}
+		}
+
+		AutoResetEvent _pollThreadIdle = new AutoResetEvent(initialState: false);
+
+		public void WaitForPollThreadIdle()
+		{
+			_pollThreadIdle.WaitOne();
 		}
 
 		void PollThread()
@@ -327,13 +429,34 @@ namespace MusicBoxSynchronizer
 
 					request.IncludeRemoved = true;
 
-					var changeList = request.Execute();
+					ChangeList? changeList;
+
+					try
+					{
+						changeList = request.Execute();
+					}
+					catch (HttpRequestException e)
+					{
+						OnDiagnosticOutput("HTTP request exception: " + e);
+
+						Thread.Sleep(TimeSpan.FromSeconds(10));
+
+						continue;
+					}
 
 					OnDiagnosticOutput($"  Results: {changeList.Changes.Count} changes");
 
+					if (!changeList.Changes.Any())
+						_pollThreadIdle.Set();
+					else
+						_pollThreadIdle.Reset();
+
 					foreach (var change in changeList.Changes)
 					{
-						var changeInfo = _manifest.RegisterChange(change, this);
+						ChangeInfo? changeInfo;
+
+						lock (_selfChangeSync)
+							changeInfo = _manifest.RegisterChange(change, this);
 
 						// If a file is marked Trashed and it's already not in the manifest, no change is returned.
 						if (changeInfo != null)
@@ -348,20 +471,26 @@ namespace MusicBoxSynchronizer
 					}
 
 					if (!string.IsNullOrEmpty(changeList.NextPageToken))
+					{
 						_manifest.PageToken = changeList.NextPageToken;
-					else
+						OnDiagnosticOutput("Next page token: " + _manifest.PageToken);
+					}
+					else if (!string.IsNullOrEmpty(changeList.NewStartPageToken))
 					{
 						_manifest.PageToken = changeList.NewStartPageToken;
+						OnDiagnosticOutput("New start page token: " + _manifest.PageToken);
 						break;
 					}
+					else
+						OnDiagnosticOutput("ERROR: Google API did not return either of NextPageToken and NewStartPageToken");
 				}
 
 				OnDiagnosticOutput("End of batch");
 
 				SaveManifest();
 
-				lock (_sync)
-					Monitor.Wait(_sync, TimeSpan.FromSeconds(5));
+				lock (_threadSync)
+					Monitor.Wait(_threadSync, TimeSpan.FromSeconds(5));
 			}
 		}
 	}

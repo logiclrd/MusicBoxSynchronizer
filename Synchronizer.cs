@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 
 namespace MusicBoxSynchronizer
 {
@@ -39,25 +41,87 @@ namespace MusicBoxSynchronizer
 
 		public event EventHandler<string>? DiagnosticOutput;
 
-		void EnsureInitialStateOfLocalFiles()
+		void OnDiagnosticOutput(string line)
 		{
-			foreach (var folderPath in _googleDriveRepository.EnumerateFolders())
-				if (!_localFileSystemRepository.DoesFolderExist(folderPath))
-				{
-					_localFileSystemRepository.CreateFolder(folderPath);
-					_localFileSystemRepository.RegisterFolder(folderPath);
-				}
+			DiagnosticOutput?.Invoke(this, line);
+		}
+
+		// To be called after ensuring that the Google Drive repository event queue is drained.
+		// Pushes local differences that may have happened when we weren't receiving events up
+		// to Google Drive. The opposite direction doesn't need this because Google Drive's
+		// event queue model is persistent and disconnected; if we're offline for a while,
+		// we won't lose any events. Locally, though, we can and do lose events if we're not
+		// actively running/monitoring.
+
+		void CheckForLocalChanges()
+		{
+			var deletedFolders = new List<string>();
+
+			OnDiagnosticOutput("=> Checking for remote files that don't exist locally");
 
 			foreach (var fileInfo in _googleDriveRepository.EnumerateFiles())
-				if (!_localFileSystemRepository.DoesFileExist(fileInfo))
+			{
+				if (!_localFileSystemRepository.DoesFileExistInManifest(fileInfo))
 				{
-					using (var contentStream = _googleDriveRepository.GetFileContentStream(fileInfo.FilePath))
-						_localFileSystemRepository.CreateOrUpdateFile(fileInfo.FilePath, contentStream);
+					OnDiagnosticOutput("   * REMOVE: " + fileInfo.FilePath);
 
-					_localFileSystemRepository.RegisterFile(fileInfo);
+					QueueChangeForProcessing(
+						new ChangeInfo(
+							sourceRepository: _localFileSystemRepository,
+							changeType: ChangeType.Removed,
+							filePath: fileInfo.FilePath));
 				}
+			}
 
-			_localFileSystemRepository.SaveManifest();
+			OnDiagnosticOutput("=> Checking for remote folders that don't exist locally");
+
+			foreach (var folderPath in _googleDriveRepository.EnumerateFolders())
+			{
+				if (!_localFileSystemRepository.DoesFolderExistInManifest(folderPath))
+				{
+					OnDiagnosticOutput("   * REMOVE: " + folderPath);
+
+					QueueChangeForProcessing(
+						new ChangeInfo(
+							sourceRepository: _localFileSystemRepository,
+							changeType: ChangeType.Removed,
+							isFolder: true,
+							filePath: folderPath));
+				}
+			}
+
+			OnDiagnosticOutput("=> Checking for local folders that don't exist remotely");
+
+			foreach (var folderPath in _localFileSystemRepository.EnumerateFolders())
+			{
+				if (!_googleDriveRepository.DoesFolderExistInManifest(folderPath))
+				{
+					OnDiagnosticOutput("   * CREATE: " + folderPath);
+
+					QueueChangeForProcessing(
+						new ChangeInfo(
+							sourceRepository: _localFileSystemRepository,
+							changeType: ChangeType.Created,
+							isFolder: true,
+							filePath: folderPath));
+				}
+			}
+
+			OnDiagnosticOutput("=> Checking for local files that don't exist remotely");
+
+			foreach (var fileInfo in _localFileSystemRepository.EnumerateFiles())
+			{
+				if (!_googleDriveRepository.DoesFileExistInManifest(fileInfo))
+				{
+					OnDiagnosticOutput("   * CREATE: " + fileInfo.FilePath);
+
+					QueueChangeForProcessing(
+						new ChangeInfo(
+							sourceRepository: _localFileSystemRepository,
+							changeType: ChangeType.Created,
+							filePath: fileInfo.FilePath));
+				}
+			}
 		}
 
 		ManualResetEvent _stopEvent = new ManualResetEvent(initialState: false);
@@ -79,44 +143,65 @@ namespace MusicBoxSynchronizer
 
 		void Run()
 		{
+			OnDiagnosticOutput("Startup: Initializing repositories");
+
 			_googleDriveRepository.Initialize();
 			_localFileSystemRepository.Initialize();
 
-			LoadChanges();
+			OnDiagnosticOutput("Startup: Loading changes from previous session");
+
+			int changeCount = LoadChanges();
+
+			OnDiagnosticOutput("Startup: => " + Plural(changeCount, "change"));
+
+			OnDiagnosticOutput("Startup: Starting change processor");
 
 			StartChangeProcessor();
 
-			WaitForChangeProcessorIdle();
-
-			EnsureInitialStateOfLocalFiles();
-
 			foreach (var repository in _repositories)
 			{
+				OnDiagnosticOutput("Startup: Starting monitor: " + repository.GetType().Name);
+
 				repository.ChangeDetected +=
 					(sender, change) => QueueChangeForProcessing(change);
 
 				repository.StartMonitor();
 			}
 
-			DiagnosticOutput?.Invoke(this, "Waiting for stop event");
+			OnDiagnosticOutput("Startup: Draining remote events");
+
+			_googleDriveRepository.WaitForPollThreadIdle();
+
+			lock (_sync)
+				changeCount = _changeProcessorQueue.Count;
+
+			OnDiagnosticOutput("Startup: Waiting for change processor idle (" + changeCount + ")");
+
+			WaitForChangeProcessorIdle();
+
+			OnDiagnosticOutput("Startup: Checking for changes to local state");
+
+			CheckForLocalChanges();
+
+			OnDiagnosticOutput("Waiting for stop event");
 
 			_stopEvent.WaitOne();
 
-			DiagnosticOutput?.Invoke(this, "Stopping...");
+			OnDiagnosticOutput("Stopping...");
 
 			foreach (var repository in _repositories)
 			{
-				DiagnosticOutput?.Invoke(this, "- " + repository);
+				OnDiagnosticOutput("- " + repository);
 				repository.StopMonitor();
 			}
 
-			DiagnosticOutput?.Invoke(this, "- Change processor");
+			OnDiagnosticOutput("- Change processor");
 
 			RequestChangeProcessorStop();
 
 			WaitForChangeProcessorToExit();
 
-			DiagnosticOutput?.Invoke(this, "All done!");
+			OnDiagnosticOutput("All done!");
 
 			_stoppedEvent.Set();
 		}
@@ -140,23 +225,27 @@ namespace MusicBoxSynchronizer
 			}
 		}
 
-		void LoadChanges()
+		int LoadChanges()
 		{
-			if (!File.Exists("changes"))
-				return;
-
-			using (var reader = new StreamReader("changes"))
+			if (File.Exists("changes"))
 			{
-				string countString = reader.ReadLine() ?? throw new Exception("Unexpected EOF in changes file");
-
-				if (int.TryParse(countString, out var count))
+				using (var reader = new StreamReader("changes"))
 				{
-					_changeProcessorQueue.Clear();
+					string countString = reader.ReadLine() ?? throw new Exception("Unexpected EOF in changes file");
 
-					for (int i=0; i < count; i++)
-						_changeProcessorQueue.Enqueue(ChangeInfo.FromString(reader.ReadLine() ?? throw new Exception("Unexpected EOF in changes file"), ResolveRepository));
+					if (int.TryParse(countString, out var count))
+					{
+						_changeProcessorQueue.Clear();
+
+						for (int i = 0; i < count; i++)
+							_changeProcessorQueue.Enqueue(ChangeInfo.FromString(reader.ReadLine() ?? throw new Exception("Unexpected EOF in changes file"), ResolveRepository));
+
+						return count;
+					}
 				}
 			}
+
+			return 0;
 		}
 
 		bool IsRecentChange(ChangeInfo change)
@@ -178,6 +267,8 @@ namespace MusicBoxSynchronizer
 
 		void QueueChangeForProcessing(ChangeInfo change)
 		{
+			OnDiagnosticOutput("QUEUE CHANGE: " + change.ChangeType + " " + change.FilePath);
+
 			lock (_sync)
 			{
 				if (change.ChangeType == ChangeType.MovedAndModified)
@@ -229,9 +320,18 @@ namespace MusicBoxSynchronizer
 
 		void WaitForChangeProcessorIdle()
 		{
+			Console.WriteLine("WAIT: obtain lock");
 			lock (_sync)
+			{
+				Console.WriteLine("WAIT: lock obtained, entering loop");
 				while (_changeProcessorBusy || _changeProcessorQueue.Any())
+				{
+					Console.WriteLine("busy? {0}  queue: {1}", _changeProcessorBusy, _changeProcessorQueue.Count);
 					Monitor.Wait(_sync);
+				}
+				Console.WriteLine("WAIT: after loop");
+			}
+			Console.WriteLine("WAIT: finished");
 		}
 
 		void WaitForChangeProcessorToExit()
@@ -285,27 +385,48 @@ namespace MusicBoxSynchronizer
 		{
 			try
 			{
+				if (File.Exists("change_processor_thread_crash"))
+					File.Delete("change_processor_thread_crash");
+
 				_changeProcessorRunning = true;
 
 				while (_changeProcessorQueue.Any() || !_changeProcessorStopping)
 				{
 					ChangeInfo? change;
 
+					Console.WriteLine("[CPT] Top of loop, obtaining lock");
+
 					lock (_sync)
 					{
 						_changeProcessorBusy = false;
 
+						Console.WriteLine("[CPT] Pulse anybody waiting");
+
 						Monitor.PulseAll(_sync);
+
+						Console.WriteLine("[CPT] Serialize changes");
 
 						SaveChanges();
 
+						Console.WriteLine("[CPT] Try to dequeue change");
+
 						while (!_changeProcessorQueue.TryDequeue(out change) && !_changeProcessorStopping)
+						{
+							Console.WriteLine("[CPT] Sync wait");
 							Monitor.Wait(_sync);
+						}
 
 						if (change == null)
+						{
+							Console.WriteLine("[CPT] DID NOT GET A CHANGE (??)");
 							continue;
+						}
+
+						OnDiagnosticOutput("DEQUEUED: " + change.ChangeType + " " + change.FilePath);
 
 						_changeProcessorBusy = true;
+
+						Console.WriteLine("[CPT] Checking for recent changes that this supersedes");
 
 						if ((change.ChangeType == ChangeType.Created)
 						 || (change.ChangeType == ChangeType.Removed))
@@ -320,22 +441,36 @@ namespace MusicBoxSynchronizer
 
 								if ((previousChange.ChangeInfo.FilePath == change.FilePath)
 								 && (previousChange.ChangeInfo.ChangeType == forgetChangeType))
+								{
+									Console.WriteLine("[CPT] => forgetting a recent change");
 									_recentChanges.RemoveAt(i);
+								}
 							}
 						}
+
+						Console.WriteLine("[CPT] Logging new recent change");
 
 						_recentChanges.Add(new ChangeEvent(this, change));
 					}
 
-					if (change == null)
-						continue;
+					Console.WriteLine("[CPT] Process change");
+					Console.WriteLine("[CPT] - type: {0}", change.ChangeType);
+					if (change.OldFilePath != null)
+						Console.WriteLine("[CPT] - path: {0} (<- {1})", change.FilePath, change.OldFilePath);
+					else
+						Console.WriteLine("[CPT] - path: {0}", change.FilePath);
 
 					ProcessChange(change);
 				}
 			}
 			catch (Exception e)
 			{
+				Console.WriteLine("[CPT] CRASH: " + e);
+
+				var timestamped = "change_processor_thread_crash." + DateTime.UtcNow.ToString("yyyy-MM-dd_HH-mm-ss");
+
 				File.WriteAllText("change_processor_thread_crash", e.ToString());
+				File.WriteAllText(timestamped, e.ToString());
 			}
 			finally
 			{
@@ -345,6 +480,22 @@ namespace MusicBoxSynchronizer
 					_changeProcessorRunning = false;
 					Monitor.PulseAll(_sync);
 				}
+
+				if (!_changeProcessorStopping)
+				{
+					void RestartChangeProcessor()
+					{
+						Thread.Sleep(30000);
+
+						if (!_changeProcessorRunning)
+							StartChangeProcessor();
+					}
+
+					var restartThread = new Thread(RestartChangeProcessor);
+
+					restartThread.IsBackground = true;
+					restartThread.Start();
+				}
 			}
 		}
 
@@ -352,48 +503,97 @@ namespace MusicBoxSynchronizer
 		{
 			foreach (var repository in _repositories)
 			{
-				if (repository != change.SourceRepository)
+				while (true)
 				{
-					if (change.IsFile)
+					try
 					{
-						switch (change.ChangeType)
+						if (repository != change.SourceRepository)
 						{
-							case ChangeType.Created:
-							case ChangeType.Modified:
-								using (var contentStream = change.SourceRepository.GetFileContentStream(change.FilePath))
-									repository.CreateOrUpdateFile(change.FilePath, contentStream);
-								break;
-							case ChangeType.Moved:
-							case ChangeType.Renamed:
-								repository.MoveFile(
-									change.OldFilePath ?? throw new Exception(change.ChangeType + " change event was created without OldFilePath"),
-									change.FilePath);
-								break;
-							case ChangeType.Removed:
-								repository.RemoveFile(change.FilePath);
-								break;
+							if (change.IsFile)
+							{
+								switch (change.ChangeType)
+								{
+									case ChangeType.Created:
+									case ChangeType.Modified:
+									{
+										try
+										{
+											using (var contentStream = change.SourceRepository.GetFileContentStream(change.FilePath))
+											{
+												try
+												{
+													repository.CreateOrUpdateFile(change.FilePath, contentStream);
+												}
+												catch (Exception e)
+												{
+													OnDiagnosticOutput("Failed to push file: " + change.FilePath);
+													OnDiagnosticOutput("  to repository: " + repository.GetType().Name);
+													OnDiagnosticOutput(e.ToString());
+													throw;
+												}
+											}
+										}
+										catch (Exception e)
+										{
+											OnDiagnosticOutput("Failed to obtain file content stream for: " + change.FilePath);
+											OnDiagnosticOutput(e.ToString());
+											throw;
+										}
+
+										break;
+									}
+									case ChangeType.Moved:
+									case ChangeType.Renamed:
+										repository.MoveFile(
+											change.OldFilePath ?? throw new Exception(change.ChangeType + " change event was created without OldFilePath"),
+											change.FilePath);
+										break;
+									case ChangeType.Removed:
+										repository.RemoveFile(change.FilePath);
+										break;
+								}
+							}
+							else
+							{
+								switch (change.ChangeType)
+								{
+									case ChangeType.Created:
+										repository.CreateFolder(change.FilePath);
+										break;
+									case ChangeType.Moved:
+									case ChangeType.Renamed:
+										repository.MoveFolder(
+											change.OldFilePath ?? throw new Exception(change.ChangeType + " change event was created without OldFilePath"),
+											change.FilePath);
+										break;
+									case ChangeType.Removed:
+										repository.RemoveFolder(change.FilePath);
+										break;
+								}
+							}
 						}
 					}
-					else
+					catch (TaskCanceledException) when (!_changeProcessorStopping)
 					{
-						switch (change.ChangeType)
-						{
-							case ChangeType.Created:
-								repository.CreateFolder(change.FilePath);
-								break;
-							case ChangeType.Moved:
-							case ChangeType.Renamed:
-								repository.MoveFolder(
-									change.OldFilePath ?? throw new Exception(change.ChangeType + " change event was created without OldFilePath"),
-									change.FilePath);
-								break;
-							case ChangeType.Removed:
-								repository.RemoveFolder(change.FilePath);
-								break;
-						}
+						// Retry
+						continue;
 					}
+
+					// Don't retry
+					break;
 				}
 			}
+		}
+
+		static string Plural(int count, string singular)
+			=> Plural(count, singular, singular + "s");
+
+		static string Plural(int count, string singular, string plural)
+		{
+			if (count == 1)
+				return "1 " + singular;
+			else
+				return count + " " + plural;
 		}
 	}
 }
