@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -462,7 +463,7 @@ namespace MusicBoxSynchronizer
 
 					var request = _driveService.Changes.List(_manifest.PageToken);
 
-					request.Fields = "newStartPageToken, changes(removed, fileId, file(id, name, size, modifiedTime, md5Checksum, parents, mimeType, trashed))";
+					request.Fields = "nextPageToken, newStartPageToken, changes(removed, fileId, file(id, name, size, modifiedTime, md5Checksum, parents, mimeType, trashed))";
 
 					request.IncludeRemoved = true;
 
@@ -527,7 +528,10 @@ namespace MusicBoxSynchronizer
 						break;
 					}
 					else
+					{
 						OnDiagnosticOutput("ERROR: Google API did not return either of NextPageToken and NewStartPageToken");
+						Debugger.Break();
+					}
 				}
 
 				OnDiagnosticOutput("End of batch");

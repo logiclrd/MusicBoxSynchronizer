@@ -272,7 +272,8 @@ namespace MusicBoxSynchronizer
 
 			OnDiagnosticOutput("=> Physical delete: " + fullPath);
 
-			File.Delete(fullPath);
+			if (File.Exists(fullPath))
+				File.Delete(fullPath);
 
 			OnDiagnosticOutput("=> Register change with manifest");
 

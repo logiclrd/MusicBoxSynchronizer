@@ -1,8 +1,6 @@
 using System;
-using System.Data;
 using System.IO;
 using System.Linq;
-using System.Text;
 
 using File = Google.Apis.Drive.v3.Data.File;
 
@@ -22,6 +20,9 @@ namespace MusicBoxSynchronizer
 				{
 					if (_md5ChecksumSourceLocalFilePath == null)
 						throw new Exception("Internal error: Lazy load MD5 checksum field does not have a source local file path");
+
+					if (!System.IO.File.Exists(_md5ChecksumSourceLocalFilePath))
+						return "<unknown>";
 
 					_md5Checksum = MD5Utility.ComputeChecksum(_md5ChecksumSourceLocalFilePath);
 				}
