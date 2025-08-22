@@ -1,9 +1,7 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
-using System.Security.Cryptography;
 using System.Threading;
 
 namespace MusicBoxSynchronizer
@@ -183,7 +181,10 @@ namespace MusicBoxSynchronizer
 					modifiedTimeUTC: fileInfo.ModifiedTimeUTC);
 			}
 
-			Directory.Delete(GetFullPath(path), recursive: true);
+			string fullPath = GetFullPath(path);
+
+			if (Directory.Exists(fullPath))
+				Directory.Delete(fullPath, recursive: true);
 		}
 
 		public override void CreateOrUpdateFile(string path, Stream content)
@@ -380,6 +381,45 @@ namespace MusicBoxSynchronizer
 
 		void QueueChangedEvent(ChangeType changeType, string fullPath, string? oldFullPath = null)
 		{
+			// Make sure that the new state differs from the manifest data.
+			if ((changeType == ChangeType.Created) || (changeType == ChangeType.Modified))
+			{
+				if (!File.Exists(fullPath))
+					return; // ?
+
+				string? relativePath = PathUtility.GetRelativePath(_rootPath, fullPath);
+
+				if (relativePath != null)
+				{
+					var fileID = _manifest!.GetFileID(relativePath);
+
+					if (fileID != null)
+					{
+						var fileInfo = _manifest.GetFileInfo(fileID);
+
+						if (fileInfo != null)
+						{
+							if ((new FileInfo(fullPath).Length == fileInfo.FileSize)
+							 && (MD5Utility.ComputeChecksum(fullPath) == fileInfo.MD5Checksum))
+							{
+								OnDiagnosticOutput("=> suppressing spurious " + changeType + " event");
+								return; // why are we here?
+							}
+						}
+					}
+				}
+			}
+			else if (changeType == ChangeType.Removed)
+			{
+				var relativePath = PathUtility.GetRelativePath(_rootPath, fullPath);
+
+				if ((relativePath != null) && (_manifest!.GetFileID(relativePath) == null))
+				{
+					OnDiagnosticOutput("=> suppressing spurious " + changeType + " event");
+					return; // already doesn't exist??
+				}
+			}
+
 			var queueEntry = new QueueEntry(changeType, fullPath, oldFullPath);
 
 			queueEntry.DueTimeUTC = DateTime.UtcNow + EventCoalesceWindowLength;

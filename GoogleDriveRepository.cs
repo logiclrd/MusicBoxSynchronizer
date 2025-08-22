@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
+using System.Net.Http.Headers;
 using System.Threading;
+using System.Threading.Tasks;
 
 using Google.Apis.Auth.OAuth2;
 using Google.Apis.Drive.v3;
@@ -20,15 +22,20 @@ namespace MusicBoxSynchronizer
 
 		DriveService? _driveService;
 		Manifest? _manifest;
+		bool _hasContinuity;
 		object _threadSync = new object();
 		object _selfChangeSync = new object();
 		bool _stopping = false;
+
+		public bool HasContinuity => _hasContinuity;
 
 		const string ManifestStateFileName = "google_drive_manifest";
 
 		public void Initialize()
 		{
 			ConnectToDriveService();
+
+			_hasContinuity = true;
 
 			Manifest? TryLoadManifest()
 			{
@@ -53,6 +60,8 @@ namespace MusicBoxSynchronizer
 
 				manifest.HasChanges = true;
 
+				_hasContinuity = false;
+
 				return manifest;
 			}
 
@@ -63,6 +72,8 @@ namespace MusicBoxSynchronizer
 				if (string.IsNullOrEmpty(_manifest.PageToken))
 				{
 					OnDiagnosticOutput("WARNING: Page token missing, grabbing a fresh start token");
+
+					_hasContinuity = false;
 
 					var getStartPageTokenRequest = _driveService!.Changes.GetStartPageToken();
 
@@ -370,22 +381,44 @@ namespace MusicBoxSynchronizer
 			if (!(_manifest!.GetFileID(path) is string fileID))
 				throw new FileNotFoundException("No file was found with the specified path: " + path);
 
+			if (!(_manifest!.GetFileInfo(fileID) is ManifestFileInfo fileInfo))
+				throw new Exception("Internal error: path " + path + " maps to ID " + fileID + " but no ManifestFileInfo was found with that ID.");
+
 			OnDiagnosticOutput("Retrieving file: " + path);
 
 			var get = _driveService!.Files.Get(fileID);
 
 			get.Alt = DriveBaseServiceRequest<Google.Apis.Drive.v3.Data.File>.AltEnum.Media;
 
-			using (var downloadStream = get.ExecuteAsStream())
+			const int ChunkSize = 262144;
+
+			var temporaryFileStream = new TemporaryFileStream(Path.GetTempFileName(), FileMode.Open, FileAccess.ReadWrite);
+
+			OnDiagnosticOutput("ATTEMPTING DOWNLOAD IN CHUNKS OF SIZE " + ChunkSize);
+
+			for (int chunkOffset = 0; chunkOffset < fileInfo.FileSize; chunkOffset += ChunkSize)
 			{
-				var temporaryFileStream = new TemporaryFileStream(Path.GetTempFileName(), FileMode.Open, FileAccess.ReadWrite);
+				int thisChunkSize = ChunkSize;
 
-				downloadStream.CopyTo(temporaryFileStream);
+				if (chunkOffset + thisChunkSize > fileInfo.FileSize)
+					thisChunkSize = (int)(fileInfo.FileSize - chunkOffset);
 
-				temporaryFileStream.Position = 0;
+				var rangeHeader = new RangeHeaderValue(chunkOffset, chunkOffset + thisChunkSize - 1);
 
-				return temporaryFileStream;
+				var range = rangeHeader.Ranges.Single();
+
+				OnDiagnosticOutput("=> CHUNK: " + range.From + "-" + range.To + " (of " + fileInfo.FileSize + ")");
+
+				get.DownloadRange(
+					temporaryFileStream,
+					rangeHeader);
 			}
+
+			OnDiagnosticOutput("ALL CHUNKS RECEIVED, FILE SIZE = " + fileInfo.FileSize + ", OUTPUT POSITION = " + temporaryFileStream.Position);
+
+			temporaryFileStream.Position = 0;
+
+			return temporaryFileStream;
 		}
 
 		public override void StartMonitor()
@@ -438,6 +471,14 @@ namespace MusicBoxSynchronizer
 					try
 					{
 						changeList = request.Execute();
+					}
+					catch (TaskCanceledException e)
+					{
+						OnDiagnosticOutput("HTTP request cancelled (timeout?): " + e);
+
+						Thread.Sleep(TimeSpan.FromSeconds(10));
+
+						continue;
 					}
 					catch (HttpRequestException e)
 					{

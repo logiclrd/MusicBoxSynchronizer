@@ -52,13 +52,15 @@ namespace MusicBoxSynchronizer
 		// we won't lose any events. Locally, though, we can and do lose events if we're not
 		// actively running/monitoring.
 
-		void CheckForLocalChanges()
+		void CheckForLocalChanges(bool remotePrecedence)
 		{
 			var deletedFolders = new List<string>();
 
 			OnDiagnosticOutput("=> Checking for remote files that don't exist locally");
 
 			bool removingFiles = false;
+
+			var delayAdd = new List<ChangeInfo>();
 
 			foreach (var fileInfo in _googleDriveRepository.EnumerateFiles())
 			{
@@ -68,7 +70,7 @@ namespace MusicBoxSynchronizer
 					{
 						OnDiagnosticOutput("   * MUSICBOX (always sync downstream): " + fileInfo.FilePath);
 
-						QueueChangeForProcessing(
+						delayAdd.Add(
 							new ChangeInfo(
 								sourceRepository: _googleDriveRepository,
 								changeType: ChangeType.Created,
@@ -76,15 +78,28 @@ namespace MusicBoxSynchronizer
 					}
 					else
 					{
-						OnDiagnosticOutput("   * REMOVE: " + fileInfo.FilePath);
+						if (remotePrecedence)
+						{
+							OnDiagnosticOutput("   * ADDED: " + fileInfo.FilePath);
 
-						QueueChangeForProcessing(
-							new ChangeInfo(
-								sourceRepository: _localFileSystemRepository,
-								changeType: ChangeType.Removed,
-								filePath: fileInfo.FilePath));
+							delayAdd.Add(
+								new ChangeInfo(
+									sourceRepository: _googleDriveRepository,
+									changeType: ChangeType.Created,
+									filePath: fileInfo.FilePath));
+						}
+						else
+						{
+							OnDiagnosticOutput("   * REMOVE: " + fileInfo.FilePath);
 
-						removingFiles = true;
+							QueueChangeForProcessing(
+								new ChangeInfo(
+									sourceRepository: _localFileSystemRepository,
+									changeType: ChangeType.Removed,
+									filePath: fileInfo.FilePath));
+
+							removingFiles = true;
+						}
 					}
 				}
 			}
@@ -104,15 +119,40 @@ namespace MusicBoxSynchronizer
 					if (folderPath.StartsWith("My Drive/MusicBox/"))
 						continue;
 
-					OnDiagnosticOutput("   * REMOVE: " + folderPath);
+					if (remotePrecedence)
+					{
+						OnDiagnosticOutput("   * REMOVE: " + folderPath);
 
-					QueueChangeForProcessing(
-						new ChangeInfo(
-							sourceRepository: _localFileSystemRepository,
-							changeType: ChangeType.Removed,
-							isFolder: true,
-							filePath: folderPath));
+						QueueChangeForProcessing(
+							new ChangeInfo(
+								sourceRepository: _localFileSystemRepository,
+								changeType: ChangeType.Removed,
+								isFolder: true,
+								filePath: folderPath));
+					}
+					else
+					{
+						OnDiagnosticOutput("   * ADDED: " + folderPath);
+
+						QueueChangeForProcessing(
+							new ChangeInfo(
+								sourceRepository: _googleDriveRepository,
+								changeType: ChangeType.Created,
+								isFolder: true,
+								filePath: folderPath));
+					}
 				}
+			}
+
+			if (delayAdd.Any())
+			{
+				OnDiagnosticOutput("=> Waiting for folder creations to process");
+
+				WaitForChangeProcessorIdle();
+
+				OnDiagnosticOutput("=> Queuing file creations");
+
+				delayAdd.ForEach(QueueChangeForProcessing);
 			}
 
 			OnDiagnosticOutput("=> Checking for local folders that don't exist remotely");
@@ -274,7 +314,7 @@ namespace MusicBoxSynchronizer
 
 			OnDiagnosticOutput("Startup: Checking for changes to local state");
 
-			CheckForLocalChanges();
+			CheckForLocalChanges(remotePrecedence: !_googleDriveRepository.HasContinuity);
 
 			OnDiagnosticOutput("Waiting for stop event");
 
@@ -324,7 +364,14 @@ namespace MusicBoxSynchronizer
 			{
 				using (var reader = new StreamReader("changes"))
 				{
-					string countString = reader.ReadLine() ?? throw new Exception("Unexpected EOF in changes file");
+					var countString = reader.ReadLine();
+
+					if (countString == null)
+					{
+						// ???
+						reader.Close();
+						File.Delete("changes");
+					}
 
 					if (int.TryParse(countString, out var count))
 					{

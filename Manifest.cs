@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Collections.Specialized;
 using System.IO;
 using System.IO.Enumeration;
 using System.Linq;
@@ -365,6 +364,9 @@ namespace MusicBoxSynchronizer
 
 		public void PopulateFile(ManifestFileInfo fileInfo, string fileID)
 		{
+			if (_idByPath.ContainsKey(fileInfo.FilePath))
+				System.Diagnostics.Debugger.Break();
+
 			_files[fileID] = fileInfo;
 			_idByPath[fileInfo.FilePath] = fileID;
 
