@@ -551,7 +551,8 @@ namespace MusicBoxSynchronizer
 
 						if (change == null)
 						{
-							Console.WriteLine("[CPT] DID NOT GET A CHANGE (??)");
+							if (!_changeProcessorStopping)
+								Console.WriteLine("[CPT] DID NOT GET A CHANGE (??)");
 							continue;
 						}
 
