@@ -2,8 +2,8 @@ using System.IO;
 
 namespace MusicBoxSynchronizer
 {
-    public class PathUtility
-    {
+	public class PathUtility
+	{
 		public static string? GetParentPath(string filePath)
 		{
 			int separator = filePath.LastIndexOf('/');

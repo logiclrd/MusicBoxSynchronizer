@@ -76,8 +76,10 @@ namespace MusicBoxSynchronizer
 				+ $"mimeType = '{Constants.GoogleDriveFolderMIMEType}'" +
 				" or "
 				+ $"mimeType = '{Constants.GoogleDriveShortcutMIMEType}'" +
-				$") and trashed = false and 'me' in owners";
-			listRequest.Fields = "nextPageToken, files(id, name, parents, mimeType, shortcutDetails(targetId, targetMimeType))";
+				$") and trashed = false";
+			listRequest.Fields = "nextPageToken, files(id, name, parents, shared, sharedWithMeTime, sharingUser, mimeType, shortcutDetails(targetId, targetMimeType))";
+			listRequest.IncludeItemsFromAllDrives = true;
+			listRequest.SupportsAllDrives = true;
 
 			var folderMap = new Dictionary<string, File>();
 
@@ -110,14 +112,16 @@ namespace MusicBoxSynchronizer
 					break;
 			}
 
-			string BuildPath(string folderFileId)
+			string BuildPath(string folderFileId, bool falseRoot)
 			{
 				if (folderMap.TryGetValue(folderFileId, out var folderFile))
 				{
 					string container = "";
 
 					if (folderFile.Parents?.Any() ?? false)
-						container = BuildPath(folderFile.Parents.Single()) + "/";
+						container = BuildPath(folderFile.Parents.Single(), false) + "/";
+					else if (falseRoot && (folderFile.Id != rootFolderFile.Id))
+						container = rootFolderFile.Name + "/";
 
 					return container + folderFile.Name;
 				}
@@ -127,14 +131,14 @@ namespace MusicBoxSynchronizer
 
 			foreach (var folderFile in folderMap.Values)
 			{
-				string path = BuildPath(folderFile.Id);
+				string path = BuildPath(folderFile.Id, true);
 
 				ret._folders[folderFile.Id] = path;
 				ret._idByPath[path] = folderFile.Id;
 			}
 
-			listRequest.Q = $"mimeType != '{Constants.GoogleDriveFolderMIMEType}' and trashed = false and 'me' in owners";
-			listRequest.Fields = "nextPageToken, files(id, name, parents, size, md5Checksum, modifiedTime, mimeType, shortcutDetails(targetId, targetMimeType))";
+			listRequest.Q = $"mimeType != '{Constants.GoogleDriveFolderMIMEType}' and trashed = false";
+			listRequest.Fields = "nextPageToken, files(id, name, parents, size, md5Checksum, modifiedTime, mimeType, trashed, shortcutDetails(targetId, targetMimeType))";
 			listRequest.PageToken = null;
 
 			while (true)
@@ -164,67 +168,6 @@ namespace MusicBoxSynchronizer
 					listRequest.PageToken = list.NextPageToken;
 				else
 					break;
-			}
-
-			for (int i = 0; i < shortcutTargets.Count; i++)
-			{
-				var shortcutTarget = shortcutTargets[i];
-
-				shortcutTarget.ApparentPath = ret._folders[shortcutTarget.ShortcutFileID];
-
-				listRequest.Q = $"'{shortcutTarget.ActualFileID}' in parents";
-				listRequest.PageToken = null;
-
-				while (true)
-				{
-					var list = listRequest.Execute();
-
-					foreach (var file in list.Files)
-					{
-						var actualFile = file;
-
-						// We must recurse manually into subfolders.
-						if (file.MimeType == Constants.GoogleDriveFolderMIMEType)
-						{
-							string subPath = PathUtility.Join(shortcutTarget.ApparentPath, file.Name);
-
-							ret._folders[file.Id] = subPath;
-							ret._idByPath[subPath] = file.Id;
-
-							shortcutTargets.Add((subPath, file.Id, file.Id));
-
-							continue;
-						}
-
-						// We can't filter shortcuts precisely with Q (apparently Q supports shortcutDetails.targetId but not
-						// shortcutDetails.targetMimeType), so we have to do it manually here.
-						if (file.MimeType == Constants.GoogleDriveShortcutMIMEType)
-						{
-							if (file.ShortcutDetails.TargetMimeType == Constants.GoogleDriveFolderMIMEType)
-							{
-								string subPath = PathUtility.Join(shortcutTarget.ApparentPath, file.Name);
-
-								ret._folders[file.Id] = subPath;
-								ret._idByPath[subPath] = file.Id;
-
-								shortcutTargets.Add((subPath, file.Id, file.ShortcutDetails.TargetId));
-
-								continue;
-							}
-
-							var getRequest = service.Files.Get(file.ShortcutDetails.TargetId);
-
-							actualFile = getRequest.Execute();
-						}
-
-						ret.PopulateFile(file, shortcutTarget.ShortcutFileID, actualFile);
-					}
-
-					if (!string.IsNullOrEmpty(list.NextPageToken))
-						listRequest.PageToken = list.NextPageToken;
-					else
-						break;
-				}
 			}
 
 			ret.HasChanges = false;
@@ -534,14 +477,17 @@ namespace MusicBoxSynchronizer
 
 		public ChangeInfo RegisterChange(ChangeInfo changeInfo, long fileSize, DateTime modifiedTimeUTC)
 		{
+			if (changeInfo.ChangeType == ChangeType.Created)
+				throw new Exception("Use a RegisterChange overload that takes fileID");
+
 			Console.WriteLine("RegisterChange: " + changeInfo);
 
-			if (_idByPath.TryGetValue(changeInfo.FilePath, out var fileID))
+			if (_idByPath.TryGetValue(changeInfo.FilePath, out var existingFileID))
 			{
-				Console.WriteLine("=> got file ID: " + fileID);
+				Console.WriteLine("=> got file ID: " + existingFileID);
 
 				if (changeInfo.ChangeType == ChangeType.Removed)
-					RegisterRemoval(fileID, changeInfo.SourceRepository);
+					RegisterRemoval(existingFileID, changeInfo.SourceRepository);
 				else
 				{
 					Console.WriteLine("=> building newFileInfo");
@@ -554,22 +500,22 @@ namespace MusicBoxSynchronizer
 					string fileName = PathUtility.GetFileName(changeInfo.FilePath);
 					string containerPath = PathUtility.GetParentPath(changeInfo.FilePath) ?? "";
 
-					RegisterChange(newFileInfo, fileID, fileName, "application/octet-stream", GetFileID(containerPath), changeInfo.SourceRepository);
+					RegisterChange(newFileInfo, existingFileID, fileName, "application/octet-stream", GetFileID(containerPath), changeInfo.SourceRepository);
 				}
 			}
 			else if (((changeInfo.ChangeType == ChangeType.Moved) || (changeInfo.ChangeType == ChangeType.MovedAndModified))
 			      && (changeInfo.OldFilePath != null)
-			      && _idByPath.TryGetValue(changeInfo.OldFilePath, out fileID))
+			      && _idByPath.TryGetValue(changeInfo.OldFilePath, out existingFileID))
 			{
-				var fileInfo = GetFileInfo(fileID);
+				var fileInfo = GetFileInfo(existingFileID);
 
 				if (fileInfo == null)
-					throw new Exception("Internal error: Couldn't find FileInfo for " + fileID + " (from path " + changeInfo.OldFilePath + ")");
+					throw new Exception("Internal error: Couldn't find FileInfo for " + existingFileID + " (from path " + changeInfo.OldFilePath + ")");
 
 				fileInfo.FilePath = changeInfo.FilePath;
 
 				_idByPath.Remove(changeInfo.OldFilePath);
-				_idByPath[changeInfo.FilePath] = fileID;
+				_idByPath[changeInfo.FilePath] = existingFileID;
 			}
 
 			return changeInfo;

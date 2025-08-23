@@ -116,7 +116,7 @@ namespace MusicBoxSynchronizer
 			{
 				if (!_localFileSystemRepository.DoesFolderExistInManifest(folderPath))
 				{
-					if (folderPath.StartsWith("My Drive/MusicBox/"))
+					if (folderPath.StartsWith("My Drive/MusicBox/") || (folderPath == "My Drive/MusicBox"))
 						continue;
 
 					if (remotePrecedence)
@@ -157,15 +157,20 @@ namespace MusicBoxSynchronizer
 
 			OnDiagnosticOutput("=> Checking for local folders that don't exist remotely");
 
+			List<string> snapshotOfFolders;
+
+			lock (_localFileSystemRepository.Sync)
+				snapshotOfFolders = _localFileSystemRepository.EnumerateFolders().ToList();
+
 			bool creatingFolders = false;
 
-			foreach (var folderPath in _localFileSystemRepository.EnumerateFolders())
+			foreach (var folderPath in snapshotOfFolders)
 			{
 				if (!_googleDriveRepository.DoesFolderExistInManifest(folderPath))
 				{
 					_googleDriveRepository.DoesFolderExistInManifest(folderPath);
 
-					if (folderPath.StartsWith("My Drive/MusicBox/"))
+					if (folderPath.StartsWith("My Drive/MusicBox/") || (folderPath == "My Drive/MusicBox"))
 					{
 						// local exists, remote doesn't (pick remote)
 						OnDiagnosticOutput("   * MUSICBOX (always sync downstream): " + folderPath);
@@ -201,7 +206,12 @@ namespace MusicBoxSynchronizer
 
 			OnDiagnosticOutput("=> Checking for local files that don't exist remotely");
 
-			foreach (var fileInfo in _localFileSystemRepository.EnumerateFiles())
+			List<ManifestFileInfo> snapshotOfFiles;
+
+			lock (_localFileSystemRepository.Sync)
+				snapshotOfFiles = _localFileSystemRepository.EnumerateFiles().ToList();
+
+			foreach (var fileInfo in snapshotOfFiles)
 			{
 				if (!_googleDriveRepository.DoesFileExistInManifest(fileInfo, true))
 				{
@@ -407,6 +417,13 @@ namespace MusicBoxSynchronizer
 
 		void QueueChangeForProcessing(ChangeInfo change)
 		{
+			if ((change.FilePath == "My Drive")
+			 || (change.FilePath.StartsWith("My Drive/") && (change.FilePath.LastIndexOf('/') == 8)))
+			{
+				OnDiagnosticOutput("CHANGE TO CORE FOLDER: " + change.FilePath);
+				System.Diagnostics.Debugger.Break();
+			}
+
 			OnDiagnosticOutput("QUEUE CHANGE: " + change.ChangeType + " " + change.FilePath);
 
 			lock (_sync)

@@ -10,7 +10,7 @@
             "program": "c:/code/MusicBoxSynchronizer/bin/Debug/net8.0/MusicBoxSynchronizer.exe",
             "args": ["/console"],
             "cwd": "c:/code/MusicBoxSynchronizer",
-            "console": "internalConsole",
+            "console": "externalTerminal",
             "stopAtEntry": false
         }
 

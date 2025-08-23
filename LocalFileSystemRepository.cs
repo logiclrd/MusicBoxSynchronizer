@@ -136,7 +136,17 @@ namespace MusicBoxSynchronizer
 		{
 			OnDiagnosticOutput("Ensuring folder exists: " + path);
 
-			Directory.CreateDirectory(GetFullPath(path));
+			lock (Sync)
+			{
+				string fullPath = GetFullPath(path);
+
+				Directory.CreateDirectory(fullPath);
+
+				_manifest!.RegisterChange(
+					new ChangeInfo(this, ChangeType.Created, path, isFolder: true),
+					-1,
+					Directory.GetLastWriteTimeUtc(fullPath));
+			}
 
 			return path;
 		}
@@ -145,46 +155,65 @@ namespace MusicBoxSynchronizer
 		{
 			OnDiagnosticOutput($"Moving folder: {newPath} (<- {oldPath})");
 
-			var contentItems = _manifest!.EnumerateContents(oldPath).ToList();
-
-			foreach (var fileInfo in contentItems)
+			lock (Sync)
 			{
-				string relativePath = fileInfo.FilePath.Substring(oldPath.Length);
-				string newSubpath = newPath + relativePath;
+				var contentItems = _manifest!.EnumerateContents(oldPath).ToList();
 
-				RegisterSelfChange(fileInfo.FilePath);
-				RegisterSelfChange(newSubpath);
+				foreach (var fileInfo in contentItems)
+				{
+					string relativePath = fileInfo.FilePath.Substring(oldPath.Length);
+					string newSubpath = newPath + relativePath;
 
-				_manifest.RegisterChange(
-					new ChangeInfo(this, ChangeType.Moved, newSubpath, fileInfo.FilePath, isFolder: false, fileInfo.MD5Checksum),
-					fileSize: fileInfo.FileSize,
-					modifiedTimeUTC: fileInfo.ModifiedTimeUTC);
+					RegisterSelfChange(fileInfo.FilePath);
+					RegisterSelfChange(newSubpath);
+
+					_manifest.RegisterChange(
+						new ChangeInfo(this, ChangeType.Moved, newSubpath, fileInfo.FilePath, isFolder: false, fileInfo.MD5Checksum),
+						fileSize: fileInfo.FileSize,
+						modifiedTimeUTC: fileInfo.ModifiedTimeUTC);
+				}
+
+				string oldFullPath = GetFullPath(oldPath);
+				string newFullPath = GetFullPath(newPath);
+
+				Directory.Move(
+					oldFullPath,
+					newFullPath);
+
+				_manifest!.RegisterChange(
+					new ChangeInfo(this, ChangeType.Removed, newPath, oldPath, isFolder: true),
+					-1,
+					Directory.GetLastWriteTimeUtc(newFullPath));
 			}
-
-			Directory.Move(
-				GetFullPath(oldPath),
-				GetFullPath(newPath));
 		}
 
 		public override void RemoveFolder(string path)
 		{
 			OnDiagnosticOutput("Removing folder: " + path);
 
-			var contentItems = _manifest!.EnumerateContents(path).ToList();
-
-			foreach (var fileInfo in contentItems)
+			lock (Sync)
 			{
-				RegisterSelfChange(fileInfo.FilePath);
-				_manifest.RegisterChange(
-					new ChangeInfo(this, ChangeType.Removed, fileInfo.FilePath, isFolder: false),
-					fileSize: fileInfo.FileSize,
-					modifiedTimeUTC: fileInfo.ModifiedTimeUTC);
+				var contentItems = _manifest!.EnumerateContents(path).ToList();
+
+				foreach (var fileInfo in contentItems)
+				{
+					RegisterSelfChange(fileInfo.FilePath);
+					_manifest.RegisterChange(
+						new ChangeInfo(this, ChangeType.Removed, fileInfo.FilePath, isFolder: false),
+						fileSize: fileInfo.FileSize,
+						modifiedTimeUTC: fileInfo.ModifiedTimeUTC);
+				}
+
+				string fullPath = GetFullPath(path);
+
+				if (Directory.Exists(fullPath))
+					Directory.Delete(fullPath, recursive: true);
+
+				_manifest!.RegisterChange(
+					new ChangeInfo(this, ChangeType.Removed, path, isFolder: true),
+					-1,
+					Directory.GetLastWriteTimeUtc(fullPath));
 			}
-
-			string fullPath = GetFullPath(path);
-
-			if (Directory.Exists(fullPath))
-				Directory.Delete(fullPath, recursive: true);
 		}
 
 		public override void CreateOrUpdateFile(string path, Stream content)
@@ -218,17 +247,41 @@ namespace MusicBoxSynchronizer
 				EnsureDirectoryExists(path);
 			}
 
-			using (var fileStream = File.Open(GetFullPath(path), FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite))
+			lock (Sync)
 			{
-				content.CopyTo(fileStream);
-				fileStream.SetLength(fileStream.Position);
+				bool isCreate = !File.Exists(fullPath);
 
-				fileStream.Position = 0;
+				long fileSize;
+				string md5Checksum;
 
+				using (var fileStream = File.Open(fullPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.ReadWrite))
+				{
+					content.CopyTo(fileStream);
+					fileStream.SetLength(fileStream.Position);
+
+					fileSize = fileStream.Length;
+
+					fileStream.Position = 0;
+
+					md5Checksum = MD5Utility.ComputeChecksum(fileStream);
+				}
+
+				var changeType = isCreate
+					? ChangeType.Created
+					: ChangeType.Modified;
+
+				// string fileID, string fileName, string fileMIMEType, string? fileParentFileID, MonitorableRepository sourceRepository)
 				_manifest!.RegisterChange(
-					new ChangeInfo(this, ChangeType.Modified, path, isFolder: false, MD5Utility.ComputeChecksum(fileStream)),
-					fileSize: fileStream.Length,
-					modifiedTimeUTC: DateTime.UtcNow);
+					new ManifestFileInfo(path, md5Checksum)
+					{
+						FileSize = fileSize,
+						ModifiedTimeUTC = File.GetLastWriteTimeUtc(fullPath),
+					},
+					fileID: path,
+					fileName: Path.GetFileName(path),
+					fileMIMEType: "application/octet-stream",
+					PathUtility.GetParentPath(path),
+					this);
 			}
 		}
 
@@ -248,17 +301,20 @@ namespace MusicBoxSynchronizer
 			RegisterSelfChange(oldPath);
 			RegisterSelfChange(newPath);
 
-			File.Move(
-				GetFullPath(oldPath),
-				GetFullPath(newPath),
-				overwrite: true);
-
-			if (_manifest!.GetFileInfo(oldPath) is ManifestFileInfo fileInfo)
+			lock (Sync)
 			{
-				_manifest.RegisterChange(
-					new ChangeInfo(this, ChangeType.Moved, newPath, oldPath, isFolder: false, fileInfo.MD5Checksum),
-					fileSize: fileInfo.FileSize,
-					modifiedTimeUTC: fileInfo.ModifiedTimeUTC);
+				File.Move(
+					GetFullPath(oldPath),
+					GetFullPath(newPath),
+					overwrite: true);
+
+				if (_manifest!.GetFileInfo(oldPath) is ManifestFileInfo fileInfo)
+				{
+					_manifest.RegisterChange(
+						new ChangeInfo(this, ChangeType.Moved, newPath, oldPath, isFolder: false, fileInfo.MD5Checksum),
+						fileSize: fileInfo.FileSize,
+						modifiedTimeUTC: fileInfo.ModifiedTimeUTC);
+				}
 			}
 		}
 
@@ -270,17 +326,20 @@ namespace MusicBoxSynchronizer
 
 			string fullPath = GetFullPath(path);
 
-			OnDiagnosticOutput("=> Physical delete: " + fullPath);
+			lock (Sync)
+			{
+				OnDiagnosticOutput("=> Physical delete: " + fullPath);
 
-			if (File.Exists(fullPath))
-				File.Delete(fullPath);
+				if (File.Exists(fullPath))
+					File.Delete(fullPath);
 
-			OnDiagnosticOutput("=> Register change with manifest");
+				OnDiagnosticOutput("=> Register change with manifest");
 
-			_manifest!.RegisterChange(
-				new ChangeInfo(this, ChangeType.Removed, path, isFolder: false),
-				fileSize: -1,
-				modifiedTimeUTC: default);
+				_manifest!.RegisterChange(
+					new ChangeInfo(this, ChangeType.Removed, path, isFolder: false),
+					fileSize: -1,
+					modifiedTimeUTC: default);
+			}
 
 			OnDiagnosticOutput("done");
 		}
@@ -385,26 +444,37 @@ namespace MusicBoxSynchronizer
 			// Make sure that the new state differs from the manifest data.
 			if ((changeType == ChangeType.Created) || (changeType == ChangeType.Modified))
 			{
-				if (!File.Exists(fullPath))
-					return; // ?
-
-				string? relativePath = PathUtility.GetRelativePath(_rootPath, fullPath);
-
-				if (relativePath != null)
+				lock (Sync)
 				{
-					var fileID = _manifest!.GetFileID(relativePath);
+					if (!File.Exists(fullPath))
+						return; // ?
 
-					if (fileID != null)
+					string? relativePath = PathUtility.GetRelativePath(_rootPath, fullPath);
+
+					if (relativePath != null)
 					{
-						var fileInfo = _manifest.GetFileInfo(fileID);
+						var fileID = _manifest!.GetFileID(relativePath);
 
-						if (fileInfo != null)
+						if (fileID != null)
 						{
-							if ((new FileInfo(fullPath).Length == fileInfo.FileSize)
-							 && (MD5Utility.ComputeChecksum(fullPath) == fileInfo.MD5Checksum))
+							var fileInfo = _manifest.GetFileInfo(fileID);
+
+							if (fileInfo != null)
 							{
-								OnDiagnosticOutput("=> suppressing spurious " + changeType + " event");
-								return; // why are we here?
+								if ((new FileInfo(fullPath).Length == fileInfo.FileSize)
+								&& (MD5Utility.ComputeChecksum(fullPath) == fileInfo.MD5Checksum))
+								{
+									OnDiagnosticOutput("=> suppressing spurious " + changeType + " event");
+									return; // why are we here?
+								}
+							}
+
+							var folder = _manifest.GetFolderPath(fileID);
+
+							if (folder == relativePath)
+							{
+								OnDiagnosticOutput("=> suppressing spurious " + changeType + " event (folder)");
+								return;
 							}
 						}
 					}
@@ -634,8 +704,6 @@ namespace MusicBoxSynchronizer
 
 			RaiseChangedEvent(nextEvent);
 		}
-
-
 
 		void RaiseChangedEvent(QueueEntry queueEntry)
 		{

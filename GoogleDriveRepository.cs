@@ -21,11 +21,10 @@ namespace MusicBoxSynchronizer
 	{
 		public override string? ToString() => "Google Drive Interface";
 
-		DriveService? _driveService;
+		public DriveService? _driveService;
 		Manifest? _manifest;
 		bool _hasContinuity;
 		object _threadSync = new object();
-		object _selfChangeSync = new object();
 		bool _stopping = false;
 
 		public bool HasContinuity => _hasContinuity;
@@ -185,6 +184,9 @@ namespace MusicBoxSynchronizer
 
 		public override string CreateFolder(string path)
 		{
+			if (path == "MusicBox")
+				Debugger.Break();
+
 			EnsureInitialized();
 
 			if (_manifest!.GetFileID(path) is string fileID)
@@ -215,7 +217,7 @@ namespace MusicBoxSynchronizer
 
 			creationRequest.Fields = "id";
 
-			lock (_selfChangeSync)
+			lock (Sync)
 			{
 				newFolder = creationRequest.Execute();
 
@@ -245,20 +247,34 @@ namespace MusicBoxSynchronizer
 
 				var createRequest = _driveService!.Files.Create(file, fileContent, "application/octet-stream");
 
-				lock (_selfChangeSync)
+				createRequest.Fields = "id,size,modifiedTime,md5Checksum,mimeType,parents";
+
+				lock (Sync)
 				{
-					createRequest.Upload();
+					var uploadProgress = createRequest.Upload();
+
+					if (uploadProgress.Status != Google.Apis.Upload.UploadStatus.Completed)
+						throw new Exception("Upload failed"); // retry?
+
+					var newFile = createRequest.ResponseBody;
 
 					RegisterSelfChange(filePath);
 
-					fileContent.Position = 0;
+					var changeRegistered = _manifest.RegisterChange(
+						new ManifestFileInfo(filePath, newFile.Md5Checksum)
+						{
+							FileSize = newFile.Size!.Value,
+							ModifiedTimeUTC = newFile.ModifiedTimeDateTimeOffset!.Value.UtcDateTime,
+						},
+						newFile.Id,
+						newFile.Name,
+						newFile.MimeType,
+						newFile.Parents.First(),
+						this);
 
-					string md5Checksum = MD5Utility.ComputeChecksum(fileContent);
-
-					_manifest.RegisterChange(
-						new ChangeInfo(this, ChangeType.Created, filePath, md5Checksum),
-						fileContent.Length,
-						DateTime.UtcNow);
+					if ((changeRegistered == null)
+					 || (changeRegistered.ChangeType != ChangeType.Created))
+						throw new Exception("Internal error: Change should have been registered as Created");
 				}
 			}
 			else
@@ -272,9 +288,13 @@ namespace MusicBoxSynchronizer
 
 				var updateRequest = _driveService!.Files.Update(file, _manifest.GetFileID(filePath), fileContent, "application/octet-stream");
 
-				lock (_selfChangeSync)
+				updateRequest.Fields = "id,size,modifiedTime,md5Checksum,mimeType,parents";
+
+				lock (Sync)
 				{
 					updateRequest.Upload();
+
+					var newFile = updateRequest.ResponseBody;
 
 					RegisterSelfChange(filePath);
 
@@ -282,10 +302,21 @@ namespace MusicBoxSynchronizer
 
 					string md5Checksum = MD5Utility.ComputeChecksum(fileContent);
 
-					_manifest.RegisterChange(
-						new ChangeInfo(this, ChangeType.Modified, filePath, md5Checksum),
-						fileContent.Length,
-						DateTime.UtcNow);
+					var changeRegistered = _manifest.RegisterChange(
+						new ManifestFileInfo(filePath, newFile.Md5Checksum)
+						{
+							FileSize = newFile.Size!.Value,
+							ModifiedTimeUTC = newFile.ModifiedTimeDateTimeOffset!.Value.UtcDateTime,
+						},
+						newFile.Id,
+						newFile.Name,
+						newFile.MimeType,
+						newFile.Parents.First(),
+						this);
+
+					if ((changeRegistered != null)
+					 && (changeRegistered.ChangeType != ChangeType.Modified))
+						throw new Exception("Internal error: Change should have been registered as Modified");
 				}
 			}
 		}
@@ -296,13 +327,27 @@ namespace MusicBoxSynchronizer
 
 			if (_manifest!.GetFileID(filePath) is string fileID)
 			{
+				if ((filePath == "My Drive")
+				 || (filePath.LastIndexOf('/') == 7))
+				{
+					OnDiagnosticOutput("PREVENTING REMOVAL OF A CORE FOLDER: " + filePath);
+					Debugger.Break();
+					OnChangeDetected(
+						new ChangeInfo(
+							this,
+							ChangeType.Modified,
+							filePath));
+
+					return;
+				}
+
 				OnDiagnosticOutput("Moving file to trash: " + filePath);
 
 				var file = new Google.Apis.Drive.v3.Data.File();
 
 				file.Trashed = true;
 
-				lock (_selfChangeSync)
+				lock (Sync)
 				{
 					_driveService!.Files.Update(file, fileID).Execute();
 
@@ -350,7 +395,7 @@ namespace MusicBoxSynchronizer
 				updateRequest.AddParents = _manifest.GetFileID(newParent);
 			}
 
-			lock (_selfChangeSync)
+			lock (Sync)
 			{
 				Console.WriteLine("=> Executing request against Google API");
 
@@ -501,7 +546,7 @@ namespace MusicBoxSynchronizer
 					{
 						ChangeInfo? changeInfo;
 
-						lock (_selfChangeSync)
+						lock (Sync)
 							changeInfo = _manifest.RegisterChange(change, this);
 
 						// If a file is marked Trashed and it's already not in the manifest, no change is returned.

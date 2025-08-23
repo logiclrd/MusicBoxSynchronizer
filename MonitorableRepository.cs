@@ -6,6 +6,10 @@ namespace MusicBoxSynchronizer
 {
 	public abstract class MonitorableRepository
 	{
+		object _sync = new object();
+
+		public object Sync => _sync;
+
 		public abstract bool DoesFolderExist(string path);
 		public abstract bool DoesFileExist(ManifestFileInfo fileInfo, bool requireExactFile);
 
