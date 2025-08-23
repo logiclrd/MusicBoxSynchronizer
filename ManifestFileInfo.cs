@@ -82,7 +82,7 @@ namespace MusicBoxSynchronizer
 				container = containerPath + "/";
 
 			return
-				new ManifestFileInfo(container + file.Name, actualFile.Md5Checksum)
+				new ManifestFileInfo(container + file.Name, actualFile.Md5Checksum ?? "00000000000000000000000000000000")
 				{
 					FileSize = actualFile.Size ?? -1,
 					ModifiedTimeUTC = (actualFile.ModifiedTimeDateTimeOffset ?? DateTimeOffset.MinValue).UtcDateTime,
