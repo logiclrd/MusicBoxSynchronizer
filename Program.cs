@@ -50,6 +50,7 @@ namespace MusicBoxSynchronizer
 					Console.WriteLine("Press enter to stop service");
 					Console.ReadLine();
 
+					Console.WriteLine("Requesting stop...");
 					service.StopDirect();
 
 					break;

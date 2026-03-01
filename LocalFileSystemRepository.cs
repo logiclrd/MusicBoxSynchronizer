@@ -143,9 +143,12 @@ namespace MusicBoxSynchronizer
 				Directory.CreateDirectory(fullPath);
 
 				_manifest!.RegisterChange(
-					new ChangeInfo(this, ChangeType.Created, path, isFolder: true),
-					-1,
-					Directory.GetLastWriteTimeUtc(fullPath));
+					new ManifestFileInfo(path, fullPath),
+					fileID: path,
+					fileName: Path.GetFileName(path),
+					fileMIMEType: Constants.GoogleDriveFolderMIMEType,
+					PathUtility.GetParentPath(path),
+					this);
 			}
 
 			return path;
@@ -244,7 +247,7 @@ namespace MusicBoxSynchronizer
 					}
 				}
 
-				EnsureDirectoryExists(path);
+				EnsureDirectoryExists(directoryFullPath);
 			}
 
 			lock (Sync)
@@ -265,10 +268,6 @@ namespace MusicBoxSynchronizer
 
 					md5Checksum = MD5Utility.ComputeChecksum(fileStream);
 				}
-
-				var changeType = isCreate
-					? ChangeType.Created
-					: ChangeType.Modified;
 
 				// string fileID, string fileName, string fileMIMEType, string? fileParentFileID, MonitorableRepository sourceRepository)
 				_manifest!.RegisterChange(
@@ -296,7 +295,10 @@ namespace MusicBoxSynchronizer
 			bool newExists = File.Exists(oldFullPath);
 
 			if (!oldExists && !newExists)
-				throw new Exception("Received file move/rename event but the file does not seem to exist: " + newPath + " (<- " + oldPath + ")");
+			{
+				OnDiagnosticOutput("=> File does not seem to exist: " + newPath + " (<- " + oldPath + ")");
+				return;
+			}
 
 			RegisterSelfChange(oldPath);
 			RegisterSelfChange(newPath);
@@ -433,10 +435,23 @@ namespace MusicBoxSynchronizer
 				modifiedTimeUTC = fileInfo.LastWriteTimeUtc;
 			}
 
-			_manifest!.RegisterChange(
-				change,
-				fileSize,
-				modifiedTimeUTC);
+			if (change.ChangeType == ChangeType.Created)
+			{
+				_manifest!.RegisterChange(
+					new ManifestFileInfo(change.FilePath, fullPath),
+					fileID: change.FilePath,
+					fileName: Path.GetFileName(change.FilePath),
+					fileMIMEType: "application/octet-stream",
+					PathUtility.GetParentPath(change.FilePath),
+					this);
+			}
+			else
+			{
+				_manifest!.RegisterChange(
+					change,
+					fileSize,
+					modifiedTimeUTC);
+			}
 		}
 
 		void QueueChangedEvent(ChangeType changeType, string fullPath, string? oldFullPath = null)

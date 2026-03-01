@@ -51,14 +51,16 @@ namespace MusicBoxSynchronizer
 		// event queue model is persistent and disconnected; if we're offline for a while,
 		// we won't lose any events. Locally, though, we can and do lose events if we're not
 		// actively running/monitoring.
+		//
+		// Update: Have decided that deletions should only be pushed if they are actively
+		// observed. As such, this function now always restores missing local copies. If they
+		// are deleted while the service is actively monitoring, that deletion will be mirrored.
 
-		void CheckForLocalChanges(bool remotePrecedence)
+		void CheckForLocalChanges()
 		{
 			var deletedFolders = new List<string>();
 
 			OnDiagnosticOutput("=> Checking for remote files that don't exist locally");
-
-			bool removingFiles = false;
 
 			var delayAdd = new List<ChangeInfo>();
 
@@ -78,36 +80,15 @@ namespace MusicBoxSynchronizer
 					}
 					else
 					{
-						if (remotePrecedence)
-						{
-							OnDiagnosticOutput("   * ADDED: " + fileInfo.FilePath);
+						OnDiagnosticOutput("   * REPLACE MISSING LOCAL FILE: " + fileInfo.FilePath);
 
-							delayAdd.Add(
-								new ChangeInfo(
-									sourceRepository: _googleDriveRepository,
-									changeType: ChangeType.Created,
-									filePath: fileInfo.FilePath));
-						}
-						else
-						{
-							OnDiagnosticOutput("   * REMOVE: " + fileInfo.FilePath);
-
-							QueueChangeForProcessing(
-								new ChangeInfo(
-									sourceRepository: _localFileSystemRepository,
-									changeType: ChangeType.Removed,
-									filePath: fileInfo.FilePath));
-
-							removingFiles = true;
-						}
+						delayAdd.Add(
+							new ChangeInfo(
+								sourceRepository: _googleDriveRepository,
+								changeType: ChangeType.Created,
+								filePath: fileInfo.FilePath));
 					}
 				}
-			}
-
-			if (removingFiles)
-			{
-				OnDiagnosticOutput("=> Waiting for queued file removals to complete");
-				WaitForChangeProcessorIdle();
 			}
 
 			OnDiagnosticOutput("=> Checking for remote folders that don't exist locally");
@@ -119,28 +100,14 @@ namespace MusicBoxSynchronizer
 					if (folderPath.StartsWith("My Drive/MusicBox/") || (folderPath == "My Drive/MusicBox"))
 						continue;
 
-					if (remotePrecedence)
-					{
-						OnDiagnosticOutput("   * REMOVE: " + folderPath);
+					OnDiagnosticOutput("   * RECREATE MISSING LOCAL FOLDER: " + folderPath);
 
-						QueueChangeForProcessing(
-							new ChangeInfo(
-								sourceRepository: _localFileSystemRepository,
-								changeType: ChangeType.Removed,
-								isFolder: true,
-								filePath: folderPath));
-					}
-					else
-					{
-						OnDiagnosticOutput("   * ADDED: " + folderPath);
-
-						QueueChangeForProcessing(
-							new ChangeInfo(
-								sourceRepository: _googleDriveRepository,
-								changeType: ChangeType.Created,
-								isFolder: true,
-								filePath: folderPath));
-					}
+					QueueChangeForProcessing(
+						new ChangeInfo(
+							sourceRepository: _googleDriveRepository,
+							changeType: ChangeType.Created,
+							isFolder: true,
+							filePath: folderPath));
 				}
 			}
 
@@ -213,9 +180,9 @@ namespace MusicBoxSynchronizer
 
 			foreach (var fileInfo in snapshotOfFiles)
 			{
-				if (!_googleDriveRepository.DoesFileExistInManifest(fileInfo, true))
+				if (!_googleDriveRepository.DoesFileExistInManifest(fileInfo, requireExactFile: true))
 				{
-					if (!_googleDriveRepository.DoesFileExistInManifest(fileInfo, false))
+					if (_googleDriveRepository.DoesFileExistInManifest(fileInfo, requireExactFile: false))
 					{
 						if (fileInfo.FilePath.StartsWith("My Drive/MusicBox/"))
 						{
@@ -273,80 +240,102 @@ namespace MusicBoxSynchronizer
 		public void Start()
 		{
 			_stopEvent.Reset();
+			_stoppedEvent.Reset();
 
 			new Thread(Run).Start();
 		}
 
 		public void Stop()
 		{
-			_stoppedEvent.Reset();
-			_stopEvent.Set();
+			lock (_sync)
+			{
+				Console.WriteLine("- setting _stopEvent");
+				_stopEvent.Set();
+				Console.WriteLine("- pulsing anybody waiting");
+				Monitor.PulseAll(_sync);
+			}
+
+			Console.WriteLine("- waiting for _stoppedEvent");
 			_stoppedEvent.WaitOne();
 		}
 
 		void Run()
 		{
-			OnDiagnosticOutput("Startup: Initializing repositories");
+			string allDone = "All done!";
 
-			_googleDriveRepository.Initialize();
-			_localFileSystemRepository.Initialize();
-
-			OnDiagnosticOutput("Startup: Loading changes from previous session");
-
-			int changeCount = LoadChanges();
-
-			OnDiagnosticOutput("Startup: => " + Plural(changeCount, "change"));
-
-			OnDiagnosticOutput("Startup: Starting change processor");
-
-			StartChangeProcessor();
-
-			foreach (var repository in _repositories)
+			try
 			{
-				OnDiagnosticOutput("Startup: Starting monitor: " + repository.GetType().Name);
+				OnDiagnosticOutput("Startup: Initializing repositories");
 
-				repository.ChangeDetected +=
-					(sender, change) => QueueChangeForProcessing(change);
+				_googleDriveRepository.Initialize();
+				_localFileSystemRepository.Initialize();
 
-				repository.StartMonitor();
+				OnDiagnosticOutput("Startup: Loading changes from previous session");
+
+				int changeCount = LoadChanges();
+
+				OnDiagnosticOutput("Startup: => " + Plural(changeCount, "change"));
+
+				OnDiagnosticOutput("Startup: Starting change processor");
+
+				StartChangeProcessor();
+
+				foreach (var repository in _repositories)
+				{
+					OnDiagnosticOutput("Startup: Starting monitor: " + repository.GetType().Name);
+
+					repository.ChangeDetected +=
+						(sender, change) => QueueChangeForProcessing(change);
+
+					repository.StartMonitor();
+				}
+
+				OnDiagnosticOutput("Startup: Draining remote events");
+
+				_googleDriveRepository.WaitForPollThreadIdle();
+
+				lock (_sync)
+					changeCount = _changeProcessorQueue.Count;
+
+				OnDiagnosticOutput("Startup: Waiting for change processor idle (" + changeCount + ")");
+
+				WaitForChangeProcessorIdle();
+
+				OnDiagnosticOutput("Startup: Checking for changes to local state");
+
+				CheckForLocalChanges();
+
+				OnDiagnosticOutput("Waiting for stop event");
+
+				_stopEvent.WaitOne();
+
+				OnDiagnosticOutput("Stopping...");
+
+				foreach (var repository in _repositories)
+				{
+					OnDiagnosticOutput("- " + repository);
+					repository.StopMonitor();
+				}
+
+				OnDiagnosticOutput("- Change processor");
+
+				RequestChangeProcessorStop();
+
+				WaitForChangeProcessorToExit();
 			}
-
-			OnDiagnosticOutput("Startup: Draining remote events");
-
-			_googleDriveRepository.WaitForPollThreadIdle();
-
-			lock (_sync)
-				changeCount = _changeProcessorQueue.Count;
-
-			OnDiagnosticOutput("Startup: Waiting for change processor idle (" + changeCount + ")");
-
-			WaitForChangeProcessorIdle();
-
-			OnDiagnosticOutput("Startup: Checking for changes to local state");
-
-			CheckForLocalChanges(remotePrecedence: !_googleDriveRepository.HasContinuity);
-
-			OnDiagnosticOutput("Waiting for stop event");
-
-			_stopEvent.WaitOne();
-
-			OnDiagnosticOutput("Stopping...");
-
-			foreach (var repository in _repositories)
+			catch (Exception e)
 			{
-				OnDiagnosticOutput("- " + repository);
-				repository.StopMonitor();
+				OnDiagnosticOutput("EXCEPTION:");
+				OnDiagnosticOutput(e.ToString());
+
+				allDone = "All done :-(";
 			}
+			finally
+			{
+				OnDiagnosticOutput(allDone);
 
-			OnDiagnosticOutput("- Change processor");
-
-			RequestChangeProcessorStop();
-
-			WaitForChangeProcessorToExit();
-
-			OnDiagnosticOutput("All done!");
-
-			_stoppedEvent.Set();
+				_stoppedEvent.Set();
+			}
 		}
 
 		MonitorableRepository ResolveRepository(string repositoryType)
@@ -480,7 +469,15 @@ namespace MusicBoxSynchronizer
 			lock (_sync)
 			{
 				while (_changeProcessorBusy || _changeProcessorQueue.Any())
+				{
+					if (_stopEvent.WaitOne(TimeSpan.Zero))
+					{
+						Console.WriteLine("[WaitForChangeProcessorIdle] Detected _stopEvent, setting _changeProcessorStopping");
+						_changeProcessorStopping = true;
+					}
+
 					Monitor.Wait(_sync);
+				}
 			}
 		}
 
@@ -566,10 +563,12 @@ namespace MusicBoxSynchronizer
 							Monitor.Wait(_sync);
 						}
 
+						if (_changeProcessorStopping)
+							continue;
+
 						if (change == null)
 						{
-							if (!_changeProcessorStopping)
-								Console.WriteLine("[CPT] DID NOT GET A CHANGE (??)");
+							Console.WriteLine("[CPT] DID NOT GET A CHANGE (??)");
 							continue;
 						}
 
@@ -683,6 +682,10 @@ namespace MusicBoxSynchronizer
 													throw;
 												}
 											}
+										}
+										catch (FileNotFoundException)
+										{
+											OnDiagnosticOutput("File no longer exists, ignoring change");
 										}
 										catch (Exception e)
 										{

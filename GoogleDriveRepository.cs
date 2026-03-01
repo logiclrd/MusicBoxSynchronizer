@@ -224,9 +224,8 @@ namespace MusicBoxSynchronizer
 				RegisterSelfChange(path);
 
 				_manifest.RegisterChange(
-					new ChangeInfo(this, ChangeType.Created, path, isFolder: true),
-					fileSize: -1,
-					DateTime.MinValue);
+					newFolder,
+					this);
 
 				return newFolder.Id;
 			}
@@ -236,7 +235,9 @@ namespace MusicBoxSynchronizer
 		{
 			EnsureInitialized();
 
-			if (_manifest!.GetFileInfo(filePath) is not ManifestFileInfo)
+			string? fileID = _manifest!.GetFileID(filePath);
+
+			if ((fileID is null) || (_manifest.GetFileInfo(fileID) is not ManifestFileInfo))
 			{
 				OnDiagnosticOutput("Creating file: " + filePath);
 
@@ -284,23 +285,23 @@ namespace MusicBoxSynchronizer
 				var file = new Google.Apis.Drive.v3.Data.File();
 
 				file.Name = PathUtility.GetFileName(filePath);
-				file.Parents = new[] { _manifest.GetFileID(PathUtility.GetParentPath(filePath) ?? "") };
 
-				var updateRequest = _driveService!.Files.Update(file, _manifest.GetFileID(filePath), fileContent, "application/octet-stream");
+				var updateRequest = _driveService!.Files.Update(file, fileID, fileContent, "application/octet-stream");
 
 				updateRequest.Fields = "id,size,modifiedTime,md5Checksum,mimeType,parents";
 
 				lock (Sync)
 				{
-					updateRequest.Upload();
+					var uploadProgress = updateRequest.Upload();
+
+					if (uploadProgress.Status != Google.Apis.Upload.UploadStatus.Completed)
+						throw new Exception("Upload failed"); // retry?
 
 					var newFile = updateRequest.ResponseBody;
 
 					RegisterSelfChange(filePath);
 
 					fileContent.Position = 0;
-
-					string md5Checksum = MD5Utility.ComputeChecksum(fileContent);
 
 					var changeRegistered = _manifest.RegisterChange(
 						new ManifestFileInfo(filePath, newFile.Md5Checksum)
